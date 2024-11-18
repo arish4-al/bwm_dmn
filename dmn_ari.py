@@ -35,6 +35,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import KFold
 from sknetwork.clustering import Louvain, Leiden, KCenters
 from sknetwork.visualization import visualize_graph
+from IPython.display import SVG
 from sklearn.metrics import adjusted_rand_score, adjusted_mutual_info_score
 from scipy import sparse
 from scipy.stats import wasserstein_distance, wasserstein_distance_nd
@@ -43,7 +44,7 @@ from pathlib import Path
 import random
 from copy import deepcopy
 import time, sys, math, string, os
-from scipy.stats import spearmanr, zscore
+from scipy.stats import spearmanr, zscore, linregress
 import umap
 from itertools import combinations, chain
 from datetime import datetime
@@ -65,6 +66,8 @@ from matplotlib.ticker import ScalarFormatter
 from matplotlib.ticker import MaxNLocator
 from matplotlib.pyplot import cm
 from venny4py.venny4py import *
+import networkx as nx
+from termcolor import colored
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -117,12 +120,54 @@ PETH_types_dict = {
     'quiescence': ['quiescence'],
     'pre-stim-prior': ['blockL', 'blockR'],
     'block50': ['block50'],
+    'stim_all': ['stimLbRcL','stimRbLcR','stimLbLcL', 'stimRbRcR'],
     'stim_surp_incon': ['stimLbRcL','stimRbLcR'],
     'stim_surp_con': ['stimLbLcL', 'stimRbRcR'],
     #'resp_surp': ['fback0sRbL', 'fback0sLbR'],
     'motor_init': ['motor_init'],
     'fback1': ['fback1'],
     'fback0': ['fback0']}  
+
+
+cortical_regions = {
+    "Prefrontal": [
+        "FRP", "ACAd", "ACAv", "PL", "ILA",
+        "ORBl", "ORBm", "ORBvl"
+    ],
+    "Lateral": [
+        "AId", "AIv", "AIp", "GU", "VISc",
+        "TEa", "PERI", "ECT"
+    ],
+    "Somatomotor": [
+        "SSs", "SSp-bfd", "SSp-tr", "SSp-ll",
+        "SSp-ul", "SSp-un", "SSp-n", "SSp-m",
+        "MOp", "MOs"
+    ],
+    "Visual": [
+        "VISal", "VISl", "VISp", "VISpl",
+        "VISli", "VISpor", "VISrl"
+    ],
+    "Medial": [
+        "VISa", "VISam", "VISpm",
+        "RSPagl", "RSPd", "RSPv"
+    ],
+    "Auditory": [
+        "AUDd", "AUDp", "AUDpo", "AUDv"
+    ]
+}
+
+cortical_colors = {"Prefrontal": 'r', 
+                   "Lateral": 'yellow',
+                   "Somatomotor": 'orange',
+                   "Visual": 'g',
+                   "Medial": 'blue',
+                   "Auditory": 'purple'
+                  }
+
+
+dmn_regs = ['ACAd', 'ACAv', 'PL', 'ILA', 'ORBl', 'ORBm', 
+            'ORBvl', 'VISa', 'VISam', 'RSPagl','RSPd', 
+            'RSPv', 'SSp-tr', 'SSp-ll', 'MOs']
 
 
 def put_panel_label(ax, k):
@@ -142,6 +187,14 @@ def grad(c, nobs, fr=1):
     cmap = mpl.cm.get_cmap(c)
 
     return [cmap(fr * (nobs - p) / nobs) for p in range(nobs)]
+
+
+def get_name(brainregion):
+    '''
+    get verbose name for brain region acronym
+    '''
+    regid = br.id[np.argwhere(br.acronym == brainregion)][0, 0]
+    return br.name[np.argwhere(br.id == regid)[0, 0]]
 
 
 def get_allen_info(rerun=False):
@@ -208,6 +261,28 @@ def get_allen_info(rerun=False):
 
 
 
+def cosine_sim(v0, v1):
+    # cosine similarity 
+    return np.inner(v0,v1)/ (norm(v0) * norm(v1))
+
+
+
+def get_reg_dist(rerun=False, algo='umap_z', 
+                  mapping='Beryl', vers='concat'):
+
+    pth_ = Path(one.cache_dir, 'dmn', 
+                f'{algo}_{mapping}_{vers}_smooth.npy')
+    if (not pth_.is_file() or rerun):
+        res, regs = smooth_dist(algo=algo, mapping=mapping, vers=vers)    
+        d = {'res': res, 'regs' : regs}
+        np.save(pth_, d, allow_pickle=True)
+    else:
+        d = np.load(pth_, allow_pickle=True).flat[0]        
+        
+    return d     
+
+
+
 def clustering_on_peth_data(r, algo='concat_z', k=2, clustering='kmeans', min_s=10, eps=0.5, random_state=0):
 
     res = r[algo]
@@ -230,7 +305,7 @@ def clustering_on_peth_data(r, algo='concat_z', k=2, clustering='kmeans', min_s=
         clusters = clustering_result.labels_
         
     elif clustering == 'birch': #birch clustering
-        clustering_result = Birch(n_clusters=None).fit(res)
+        clustering_result = Birch(n_clusters=k).fit(res)
         clusters = clustering_result.labels_
         
     elif clustering == 'mbkmeans': 
@@ -251,6 +326,7 @@ def clustering_on_peth_data(r, algo='concat_z', k=2, clustering='kmeans', min_s=
 
 
 def regional_group(mapping, algo, vers='concat', norm_=False, min_s=10, eps=0.5,
+                   run_umap=False, n_neighbors=10, d=0.2, ncomp=2,
                    nclus = 7, random_seed = 0):
 
     '''
@@ -263,9 +339,16 @@ def regional_group(mapping, algo, vers='concat', norm_=False, min_s=10, eps=0.5,
                  allow_pickle=True).flat[0]
                  
                               
+    if run_umap==True:
+        r['umap_z'] = umap.UMAP(random_state=random_seed, n_components=ncomp, min_dist=d, 
+                             n_neighbors=n_neighbors).fit_transform(r['concat_z'])
+
+    if algo=='pca_z':
+        r['pca_z'] = PCA(n_components=ncomp).fit_transform(r['concat_z'])
+                   
+
     # add point names to dict
     r['nums'] = range(len(r[algo][:,0]))
-                   
 
     if mapping in ['kmeans', 'mbkmeans', 'dbscan', 'hierarchy', 'birch', 'spectralbi', 'spectralco']:
         # use the corresponding clustering method on full data or dim-reduced 2d data
@@ -402,8 +485,219 @@ def regional_group(mapping, algo, vers='concat', norm_=False, min_s=10, eps=0.5,
     r['acs'] = acs
     r['cols'] = cols
     r['av'] = av
-              
+
     return r
+
+
+
+def smooth_dist(algo='umap_z', mapping='Beryl', show_imgs=False,
+                norm_=True, dendro=True, nmin=30, vers='concat'):
+
+    '''
+    smooth 2d pointclouds, show per class
+    norm_: normalize smoothed image by max brightness
+    '''
+
+    r = regional_group(mapping, algo, vers=vers)
+    feat = 'concat_z' if algo[-1] == 'z' else 'concat'
+    fontsize = 12
+    
+    # Define grid size and density kernel size
+    x_min = np.floor(np.min(r[algo][:,0]))
+    x_max = np.ceil(np.max(r[algo][:,0]))
+    y_min = np.floor(np.min(r[algo][:,1]))
+    y_max = np.ceil(np.max(r[algo][:,1]))
+    
+    imgs = {}
+    xys = {}
+    
+    regs00 = Counter(r['acs'])
+    regcol = {reg: np.array(r['cols'])[r['acs'] == reg][0] 
+              for reg in regs00}    
+
+    if mapping == 'Beryl':
+        # oder regions 
+        p = (Path(iblatlas.__file__).parent / 'beryl.npy')
+        regsord = dict(zip(br.id2acronym(np.load(p), 
+                           mapping='Beryl'),
+                           br.id2acronym(np.load(p), 
+                           mapping='Cosmos')))
+        regs = []
+        
+        for reg in regsord:
+            if ((reg in regs00) and (regs00[reg] > nmin)):
+                regs.append(reg)
+    
+    else:
+        regs = [reg for reg in regs00 if 
+                regs00[reg] > nmin]
+
+    for reg in regs:
+    
+        # scale values to lie within unit interval
+        x = (r[algo][np.array(r['acs'])==reg,0] - x_min)/ (x_max - x_min)    
+        y = (r[algo][np.array(r['acs'])==reg,1] - y_min)/ (y_max - y_min)
+
+        data = np.array([x,y]).T         
+        inds = (data * 255).astype('uint')  # convert to indices
+
+        img = np.zeros((256,256))  # blank image
+        for i in np.arange(data.shape[0]):  # draw pixels
+            img[inds[i,0], inds[i,1]] += 1
+        
+        imsm = ndi.gaussian_filter(img.T, (10,10))
+        imgs[reg] = imsm/np.max(imsm) if norm_ else imsm
+        xys[reg] = [x,y]
+  
+
+    if show_imgs:
+
+        # tweak for other mapping than "layers"
+        fig, axs = plt.subplots(nrows=3, ncols=len(regs),
+                                figsize=(18.6, 5.8))        
+        axs = axs.flatten()    
+        #[ax.set_axis_off() for ax in axs]
+
+        vmin = np.min([np.min(imgs[reg].flatten()) for reg in imgs])
+        vmax = np.max([np.max(imgs[reg].flatten()) for reg in imgs])
+        
+        k = 0 
+
+        # row of images showing point clouds     
+        for reg in imgs:
+            axs[k].scatter(xys[reg][0], xys[reg][1], color=regcol[reg], s=0.1)
+            axs[k].set_title(f'{reg}, ({regs00[reg]})')
+            #axs[k].set_axis_off()
+            axs[k].set_aspect('equal')
+            axs[k].spines['right'].set_visible(False)
+            axs[k].spines['top'].set_visible(False)
+            axs[k].set_xlabel('umap dim 1')
+            axs[k].set_ylabel('umap dim 2')             
+            k+=1
+            
+        # row of panels showing smoothed point clouds
+        for reg in imgs:
+            axs[k].imshow(imgs[reg], origin='lower', vmin=vmin, vmax=vmax,
+                          interpolation=None)
+            axs[k].set_title(f'{reg}, ({regs00[reg]})')
+            axs[k].set_axis_off()
+            k+=1                            
+            
+        # row of images showing mean feature vector
+        for reg in imgs:
+            pts = np.arange(len(r['acs']))[r['acs'] == reg]
+            
+            xss = T_BIN * np.arange(len(np.mean(r[feat][pts],axis=0)))
+            yss = np.mean(r[feat][pts],axis=0)
+            yss_err = np.std(r[feat][pts],axis=0)/np.sqrt(len(pts))
+                         
+            axs[k].fill_between(xss, yss - yss_err, yss + yss_err, 
+                                alpha=0.2, color = regcol[reg])    
+                
+            maxys = [yss + yss_err]  
+              
+            #region mean
+            axs[k].plot(xss,yss, color='k', linewidth=2)    
+
+            axs[k].set_title(reg)
+            axs[k].set_xlabel('time [sec]')
+            axs[k].set_ylabel(feat)
+            axs[k].set_axis_off()      
+        
+            # plot vertical boundaries for windows
+            h = 0
+            for i in r['len']:
+            
+                xv = r['len'][i] + h
+                axs[k].axvline(T_BIN * xv, linestyle='--',
+                            color='grey', linewidth=0.1)
+                            
+                axs[k].text(T_BIN * xv, 0.8 * np.max(maxys), 
+                         i, rotation=90, 
+                         fontsize=5, color='k')
+            
+                h += r['len'][i]
+            
+            k+=1
+            
+        
+        fig.suptitle(f'algo: {algo}, mapping: {mapping}, norm:{norm_}')
+        fig.tight_layout()    
+
+    # show cosine similarity of density vectors
+    
+
+    
+    res = np.zeros((len(regs),len(regs)))
+    i = 0
+    for reg_i in imgs:
+        j = 0
+        for reg_j in imgs:
+            v0 = imgs[reg_i].flatten()
+            v1 = imgs[reg_j].flatten()
+            
+            res[i,j] = cosine_sim(v0, v1)
+            j+=1
+        i+=1            
+
+    if dendro:
+        fig0, axs = plt.subplots(ncols=2, figsize=(10,8), 
+            gridspec_kw={'width_ratios': [1, 11]})
+        res = np.round(res, decimals=8)
+        
+        cres = squareform(1 - res)
+        linkage_matrix = hierarchy.linkage(cres)
+        
+
+        # Order the matrix using the hierarchical clustering
+        ordered_indices = hierarchy.leaves_list(linkage_matrix)
+        res = res[:, ordered_indices][ordered_indices, :]
+        
+        row_dendrogram = hierarchy.dendrogram(linkage_matrix,labels =regs,
+                     orientation="left", color_threshold=np.inf, ax=axs[0])
+        regs = np.array(regs)[ordered_indices]
+        
+        [t.set_color(i) for (i,t) in    
+            zip([regcol[reg] for reg in regs],
+                 axs[0].yaxis.get_ticklabels())]
+                                     
+                     
+        ax0 = axs[1]
+        
+        axs[0].axis('off')
+#        axs[0].tick_params(axis='both', labelsize=fontsize)
+#        axs[0].spines['top'].set_visible(False)
+#        axs[0].spines['bottom'].set_visible(False)    
+#        axs[0].spines['right'].set_visible(False)
+#        axs[0].spines['left'].set_visible(False)
+#        axs[0].set_xticks([])
+        
+        
+    else:
+        fig0, ax0 = plt.subplots(figsize=(4,4))
+    
+                   
+    ims = ax0.imshow(res, origin='lower', interpolation=None)
+    ax0.set_xticks(np.arange(len(regs)), regs,
+                   rotation=90, fontsize=fontsize)
+    ax0.set_yticks(np.arange(len(regs)), regs, fontsize=fontsize)               
+                   
+    [t.set_color(i) for (i,t) in
+        zip([regcol[reg] for reg in regs],
+        ax0.xaxis.get_ticklabels())] 
+         
+    [t.set_color(i) for (i,t) in    
+        zip([regcol[reg] for reg in regs],
+        ax0.yaxis.get_ticklabels())]
+    
+    #ax0.set_title(f'cosine similarity of smooth images, norm:{norm_}')
+    #ax0.set_ylabel(mapping)
+    cb = plt.colorbar(ims,fraction=0.046, pad=0.04)
+    cb.set_label('regional similarity')
+    fig0.tight_layout()
+    #fig0.suptitle(f'{algo}, {mapping}')
+    
+    return res, regs
 
 
 
@@ -412,7 +706,7 @@ def compare_distance_metrics_scatter(vers, nclus=7, nd=2, rerun=False):
     wass = np.load(Path(pth_dmn, f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), allow_pickle=True).flat[0]
     wass_d = wass['res']
     wass_regs = wass['regs']
-    umap = get_umap_dist(algo='umap_z', vers=vers, rerun=rerun)
+    umap = get_reg_dist(algo='umap_z', vers=vers, rerun=rerun)
     umap_d = umap['res']
     umap_regs = umap['regs']
 
@@ -437,10 +731,11 @@ def compare_distance_metrics_scatter(vers, nclus=7, nd=2, rerun=False):
     plt.show()
 
 
-def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clustering='hierarchy', random_state=1):
+def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clustering='hierarchy', 
+                                      random_state=0, resl=1.01):
     if clustering=='hierarchy': # Order the matrix using hierarchical clustering
         
-        if metric == 'umap_z': # convert similarity scores to distances
+        if metric in ['umap_z', 'pca_z']: # convert similarity scores to distances
             res0 = np.copy(res)
             res = np.amax(res) - res
             
@@ -451,7 +746,7 @@ def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clusterin
         regs_r = np.array(regs)[ordered_indices]
         regs_c = regs_r
         
-        if metric == 'umap_z': # convert distances back to similarity scores
+        if metric in ['umap_z', 'pca_z']: # convert distances back to similarity scores
             res = res0
         elif metric == 'wass': # convert wasserstein distance to similarity for plotting
             res = (np.amax(res) - res)/np.amax(res)
@@ -480,7 +775,7 @@ def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clusterin
         cluster_info = clustering_result.row_labels_
         
     elif clustering == 'birch': #birch clustering
-        clustering_result = Birch(n_clusters=None).fit(res)
+        clustering_result = Birch(n_clusters=k).fit(res)
         cluster_info = clustering_result.labels_
         ordered_indices = np.argsort(cluster_info)
         regs_r = np.array(regs)[ordered_indices]
@@ -505,7 +800,7 @@ def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clusterin
 
     elif clustering == 'louvain':
         adjacency = sparse.csr_matrix(res)
-        louvain = Louvain(random_state=random_state)
+        louvain = Louvain(random_state=random_state, resolution=resl)
         cluster_info = louvain.fit_predict(adjacency)
         ordered_indices=np.argsort(cluster_info)
         regs_r = np.array(regs)[ordered_indices]
@@ -514,7 +809,7 @@ def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clusterin
 
     elif clustering == 'leiden':
         adjacency = sparse.csr_matrix(res)
-        leiden = Leiden(random_state=random_state)
+        leiden = Leiden(random_state=random_state, resolution=resl)
         cluster_info = leiden.fit_predict(adjacency)
         ordered_indices=np.argsort(cluster_info)
         regs_r = np.array(regs)[ordered_indices]
@@ -538,21 +833,44 @@ def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clusterin
 
 
 
-def get_reproducibility_score(vers, clustering, k=None):
-    d = get_umap_dist(algo='umap_z', vers=vers)
+def get_reproducibility_score(vers, clustering, k=None, resl=None):
+    d = get_reg_dist(algo='umap_z', vers=vers)
     res = d['res']
     regs = d['regs']
 
     ARI, AMI = [], []
     for i in range(20):
         _, _, _, cluster_info0 = clustering_on_connectivity_matrix(
-            res, regs, k=k, clustering=clustering, random_state=i)
+            res, regs, k=k, clustering=clustering, random_state=i, resl=resl)
         _, _, _, cluster_info1 = clustering_on_connectivity_matrix(
-            res, regs, k=k, clustering=clustering, random_state=457-i)
+            res, regs, k=k, clustering=clustering, random_state=457-i, resl=resl)
     
         ARI.append(adjusted_rand_score(cluster_info0, cluster_info1))
         AMI.append(adjusted_mutual_info_score(cluster_info0, cluster_info1))
     print('mean ARI', np.mean(ARI), 'mean AMI', np.mean(AMI))
+
+
+def get_quiescence_resting_diff(metric='umap_z', diff='shifted'):
+    dr = get_reg_dist(algo=metric, vers='resting')
+    dq = get_reg_dist(algo=metric, vers='quiescence')
+    d = {}
+
+    # order regions by canonical list 
+    p = (Path(iblatlas.__file__).parent / 'beryl.npy')
+    regs_can = br.id2acronym(np.load(p), mapping='Beryl')
+    regs = [reg for reg in regs_can if reg in dr['regs']]
+    ordered_indices_r = [list(dr['regs']).index(reg) for reg in regs]
+    ordered_indices_q = [list(dq['regs']).index(reg) for reg in regs]
+    res_r = dr['res'][:, ordered_indices_r][ordered_indices_r, :]
+    res_q = dq['res'][:, ordered_indices_q][ordered_indices_q, :]
+
+    if diff == 'shifted':
+        d['res'] = res_q-res_r - np.min(res_q-res_r)
+    else:
+        d['res'] = abs(res_q-res_r)
+    d['regs'] = regs
+
+    return d
 
 
 
@@ -561,7 +879,8 @@ plotting
 '''
 
 
-def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl',norm_=False,
+def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl', norm_=False,
+                       run_umap=False, ncomp=2, n_neighbors=15, d=0.1,
                        min_s=10, eps=0.5, 
                        means=False, exa=False, shuf=False,
                        exa_squ=False, vers='concat', ax=None, ds=0.5,
@@ -585,13 +904,17 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl',norm
     
     feat = 'concat_z'
     
-    r = regional_group(mapping, algo_data, vers=vers, norm_=norm_, 
-                       min_s=min_s, eps=eps, 
-                       nclus=nclus, random_seed=random_seed)
+    r = regional_group(mapping, algo_data, vers=vers, norm_=norm_, min_s=min_s,
+                       eps=eps, run_umap=run_umap, n_neighbors=n_neighbors, d=d,
+                       ncomp=ncomp, nclus=nclus, random_seed=random_seed)
     alone = False
     if not ax:
         alone = True
-        fig, ax = plt.subplots(label=f'{vers}_{mapping}')
+        if ncomp==3:
+            fig = plt.figure(dpi=200)
+            ax = fig.add_subplot(projection='3d')
+        else:
+            fig, ax = plt.subplots(label=f'{vers}_{mapping}', dpi=200)
         #ax.set_title(vers)
     
     if shuf:
@@ -607,9 +930,12 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl',norm
                         marker='o', c=r['cols'][ff], s=ds, rasterized=True)
                         
     else: 
-        im = ax.scatter(r[algo][:,0], r[algo][:,1], 
-                        marker='o', c=r['cols'], s=ds,
-                        rasterized=True)                            
+        if ncomp==3:
+            im = ax.scatter(r[algo][:,0], r[algo][:,1], r[algo][:,2],
+                            marker='o', c=r['cols'], s=ds, rasterized=True)
+        else:
+            im = ax.scatter(r[algo][:,0], r[algo][:,1], 
+                            marker='o', c=r['cols'], s=ds, rasterized=True)                            
                         
     
     if means:
@@ -648,7 +974,7 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl',norm
     if alone:
         fig.tight_layout()
     fig.savefig(Path(one.cache_dir,'dmn', 'figs',
-        f'{algo}_{vers}_{mapping}_{nclus}_{algo_data}.png'), dpi=150, bbox_inches='tight')
+        f'{algo}_{vers}_{mapping}_{nclus}_{algo_data}_{ncomp}d_{d}_{n_neighbors}.pdf'), dpi=200, bbox_inches='tight')
 
 
     if exa:
@@ -750,7 +1076,7 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl',norm
         if alone:
             fg.tight_layout()
         fg.savefig(Path(one.cache_dir,'dmn', 'figs',
-            f'{vers}_{mapping}_clusters_{nclus}_{algo_data}.png'), dpi=150, bbox_inches='tight')
+            f'{vers}_{mapping}_clusters_{nclus}_{algo_data}.pdf'), dpi=150, bbox_inches='tight')
 
 
     if exa_squ:
@@ -842,7 +1168,7 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl',norm
 
 
 
-def clus_freqs(foc='kmeans', algo_data='concat_z', nmin=50, nclus=7, vers='concat', nd=2):
+def clus_freqs(foc='cluster', mapping='kmeans', algo_data='concat_z', nmin=50, nclus=13, vers='concat', nd=2):
 
     '''
     For each k-means cluster, show an Allen region bar plot of frequencies,
@@ -851,9 +1177,9 @@ def clus_freqs(foc='kmeans', algo_data='concat_z', nmin=50, nclus=7, vers='conca
     '''
     
     r_a = regional_group('Beryl', algo_data, vers=vers, nclus=nclus)    
-    r_k = regional_group('kmeans', algo_data, vers=vers, nclus=nclus)
+    r_k = regional_group(mapping, algo_data, vers=vers, nclus=nclus)
 
-    if foc == 'kmeans':
+    if foc == 'cluster':
     
         # show frequency of regions for all clusters
         cluss = sorted(Counter(r_k['acs']))
@@ -979,12 +1305,13 @@ def clus_freqs(foc='kmeans', algo_data='concat_z', nmin=50, nclus=7, vers='conca
         
         centers = r_k['centers']
         plot_wasserstein_matrix(weights, centers, reg_ord, cols_dictr, vers=vers, nclus=nclus, nd=nd)
+        get_difference_from_flat_dist(weights, centers, reg_ord, cols_dictr, vers=vers, nclus=nclus, nd=nd)
 
     fig.savefig(Path(pth_dmn.parent, 'figs',
                      f'{foc}_{algo_data}_{nclus}_{vers}.png')) 
     
     #if foc=='reg':
-    #    return weights, centers
+    #    return weights, centers, reg_ord
 
     
 def plot_wasserstein_matrix(weights, centers, reg_ord, cols_dictr, vers='concat', nclus=7, nd=2):
@@ -1035,10 +1362,11 @@ def plot_wasserstein_matrix(weights, centers, reg_ord, cols_dictr, vers='concat'
     for i in range(len(weights)):
         if max(weights[i])<20:
             continue
-        if sum([2*x <= max(weights[i]) for x in weights[i]]) > nclus-3:
+        if sum([2*x <= max(weights[i]) for x in weights[i]]) > nclus/2:
             print(reg_ord[i], 'overrep cluster', weights[i].index(max(weights[i])))
-            if sum([2*x <= np.sort(weights[i])[::-1][1] for x in weights[i]]) > nclus-3:
+            if sum([2*x <= np.sort(weights[i])[::-1][1] for x in weights[i]]) > nclus/2:
                 print(reg_ord[i], 'overrep cluster', weights[i].index(np.sort(weights[i])[::-1][1]))
+
 
 
 def plot_wasserstein_matrix_from_data(vers='concat', nd=2, nclus=7):
@@ -1071,7 +1399,73 @@ def plot_wasserstein_matrix_from_data(vers='concat', nd=2, nclus=7):
 
 
 
-def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=2,
+def get_difference_from_flat_dist(weights, centers, reg_ord, cols_dictr=None, vers='concat', nclus=13, nd=2):
+    '''
+    Calculate wasserstein distance between the k-means clusters distributions and a flat distribution
+    centers: the centers of the k clusters
+    weights: count for each of the k clusters in each region
+    '''
+    
+    wass = np.zeros(len(weights))
+    flat_dist = np.ones(nclus)
+    if nd==1:
+        u = np.linspace(0, nclus-1, nclus)
+        for i in range(len(weights)):
+            wass[i] = wasserstein_distance_nd(u,u,weights[i],flat_dist)
+    elif nd>1:
+        for i in range(len(weights)):
+            wass[i]= wasserstein_distance_nd(centers,centers,weights[i],flat_dist)
+    else:
+        return('what is nd')
+        
+    save_wass = {}
+    save_wass['res'] = wass
+    save_wass['regs'] = reg_ord
+    np.save(Path(pth_dmn,f'wasserstein_fromflatdist_{nclus}_{vers}_nd{nd}.npy'), save_wass, allow_pickle=True)
+
+    # plot dist in rising order for all regions
+    fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(6,7), label=f'{vers}_{nclus}', dpi=150)
+    ax[0].plot(np.sort(wass))
+    order = np.argsort(wass)
+    ax[0].set_xticks(np.arange(len(reg_ord)), np.array(reg_ord)[order], rotation=90, fontsize=4)
+    ax[0].set_title(f'{vers}')
+    ax[0].set_ylabel('wass_d from flat dist')
+
+    if cols_dictr==None:
+        r_a = regional_group('Beryl', 'umap_z', vers='concat', nclus=13)
+        cols_dictr = dict(list(Counter(zip(r_a['acs'], r_a['cols']))))
+        
+    [t.set_color(i) for (i,t) in
+        zip([cols_dictr[reg] for reg in np.array(reg_ord)[order]],
+        ax[0].xaxis.get_ticklabels())]
+
+    # plot dist w/ cortical hierarchy list
+    area_list = np.loadtxt(Path(pth_dmn,'area_list.csv'), dtype=str)
+    plot_list = set(area_list) & set(reg_ord)
+    hierarchy = [list(area_list).index(reg) for reg in plot_list]
+    order = [reg_ord.index(reg) for reg in plot_list]
+    color_list=[cols_dictr[reg] for reg in plot_list]
+    ax[1].scatter(hierarchy, wass[order], color=color_list)
+    for i, txt in enumerate(plot_list):
+        ax[1].annotate(txt, (hierarchy[i], wass[order][i]))
+
+    spearman_corr, spearman_p = spearmanr(hierarchy, wass[order])
+    slope, intercept, r_value, p_value, std_err = linregress(hierarchy, wass[order])
+    x=np.sort(hierarchy)
+    line_fit = slope * x + intercept
+    ax[1].plot(x, line_fit, color="red", label=f"Linear fit: y = {slope:.2f}x + {intercept:.2f}")
+    ax[1].legend()
+    ax[1].set_ylabel('wass_d from flat dist')
+    ax[1].set_xlabel('position in hierarchy')
+    ax[1].set_title(f'{vers}, spearman R: {spearman_corr:.2f}, p_val: {spearman_p:.4f}')
+    
+    fig.tight_layout
+    fig.savefig(Path(one.cache_dir,'dmn', 'figs', 
+                     f'{vers}_{nclus}_correlate_hierarchy.pdf'), dpi=150)
+
+
+
+def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=2, resl=1.01,
                              vers='concat', ax0=None, clustering='hierarchy', rerun=False):
 
     '''
@@ -1086,8 +1480,10 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
     elif metric == 'wass':
         d = np.load(Path(pth_dmn, f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), 
                     allow_pickle=True).flat[0]
+    elif vers == 'quie-rest-diff':
+        d = get_quiescence_resting_diff(metric=metric)
     else:     
-        d = get_umap_dist(algo=metric, vers=vers, rerun=rerun)
+        d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)
                 
     res = d['res']
     regs = d['regs']
@@ -1118,12 +1514,27 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
         node_order = list(ints) + rems
         
         ordered_indices = [list(regs).index(reg) for reg in node_order]
-        regs = np.array(regs)[ordered_indices]
+        regs_c = np.array(regs)[ordered_indices]
+        regs_r = regs_c
         res = res[:, ordered_indices][ordered_indices, :]
+
+    elif clustering=='dmn':
+        dmn_idx = [list(regs).index(reg) for reg in dmn_regs]
+        cortical_list = np.concatenate(list(cortical_regions.values()))
+        cortical_list = set(cortical_list) & set(regs)
+        ndmn_cortical_idx = [list(regs).index(reg) for reg in cortical_list
+                    if reg not in dmn_regs]
+        ndmn_idx = [list(regs).index(reg) for reg in regs
+                    if reg not in cortical_list]
+        ordered_indices = dmn_idx + ndmn_cortical_idx + ndmn_idx
+        regs_c = np.array(regs)[ordered_indices]
+        regs_r = regs_c
+        res = res[:, ordered_indices][ordered_indices, :]
+        
 
     else: 
         res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
-            res, regs, k, metric, clustering)
+            res, regs, k=k, metric=metric, clustering=clustering, resl=resl)
         
     
     ims = ax0.imshow(res, origin='lower', interpolation=None)
@@ -1167,17 +1578,22 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
     
     plt.subplots_adjust(wspace=0.05)
     fig.tight_layout()
-    if clustering in ['spectralco', 'spectralbi', 'kmeans', 'kcenters']:
+    if clustering in ['spectralco', 'spectralbi', 'kmeans', 'kcenters', 'birch']:
         fig.savefig(Path(pth_dmn.parent, 'figs', 
                          f'connectivity_matrix_{metric}_{clustering}_{vers}_k{k}.pdf'), 
                     dpi=200)
         #np.save(Path(pth_dmn.parent, 'res', 
         #                 f'cluster_info_{metric}_{clustering}_{vers}_k{k}.npy'),
         #       cluster_info, allow_pickle=True)
+    elif clustering in ['louvain', 'leiden']:
+        fig.savefig(Path(pth_dmn.parent, 'figs', 
+                         f'connectivity_matrix_{metric}_{clustering}_{vers}_{resl}.pdf'), 
+                    dpi=200)
     else:
         fig.savefig(Path(pth_dmn.parent, 'figs', 
                          f'connectivity_matrix_{metric}_{clustering}_{vers}.pdf'), 
                     dpi=200)
+        
         #np.save(Path(pth_dmn.parent, 'res', 
         #                 f'cluster_info_{metric}_{clustering}_{vers}.npy'),
         #       cluster_info, allow_pickle=True)
@@ -1189,17 +1605,17 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
     #else:
     if not alone:
         return cluster_info
-    
 
 
-def plot_all_connectivity_matrices(mapping='Beryl', nclus=7, nd=2, k_range=[2,3,4,5,6],
+def plot_all_connectivity_matrices(mapping='Beryl', algo='umap_z', nclus=7, nd=2, k_range=[2,3,4,5,6,7],
+                                   resl_range=[1,1.01,1.02,1.03,1.04,1.05,1.06,1.07],
                                    vers='concat', ax0=None, rerun=False):
 
     '''
     all-to-all matrix for all clustering measures
     '''
 
-    fig, axs = plt.subplots(nrows=4, ncols=len(k_range), rerun=False,
+    fig, axs = plt.subplots(nrows=7, ncols=len(k_range),
                             figsize=(10,10), dpi=400)
     axs = axs.flatten()
     _,pal = get_allen_info()
@@ -1213,13 +1629,13 @@ def plot_all_connectivity_matrices(mapping='Beryl', nclus=7, nd=2, k_range=[2,3,
             d = np.load(Path(pth_dmn, f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), 
                         allow_pickle=True).flat[0]
         else:
-            metric = 'umap_z'
-            d = get_umap_dist(algo=metric, vers=vers, rerun=rerun)            
+            metric = algo
+            d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)            
             
         res = d['res']
         regs = d['regs']
 
-        if n<5:
+        if n<2:
             res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
                 res=res, regs=regs, k=None, metric=metric, clustering=clustering)
             
@@ -1235,19 +1651,42 @@ def plot_all_connectivity_matrices(mapping='Beryl', nclus=7, nd=2, k_range=[2,3,
             [t.set_color(i) for (i,t) in    
                 zip([pal[reg] for reg in regs_r],
                 axs[n].yaxis.get_ticklabels())]
-            
-            axs[n].set_title(f'{metric}, {clustering}', fontsize=10)
+
+            if n==0:
+                axs[n].set_title(f'wass_{clustering}', fontsize=10)
+            else:
+                axs[n].set_title(f'{clustering}', fontsize=10)
             cbar = plt.colorbar(ims,fraction=0.046, pad=0.04, 
                         extend='neither')#, ticks=[0, 0.5, 1]
             cbar.ax.tick_params(labelsize=5)
-
-            if n==0:
-                listr[f'{clustering}_wass'] = regs_r
-            else:
-                listr[clustering] = regs_r
             
             n=n+1
             
+        elif clustering in ['louvain', 'leiden']:
+            for resl in resl_range:
+                res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
+                    res=res, regs=regs, resl=resl, metric=metric, clustering=clustering)
+                
+                ims = axs[n].imshow(res, origin='lower', interpolation=None)
+                axs[n].set_xticks(np.arange(len(regs_c)), regs_c,
+                   rotation=90, fontsize=1)
+                axs[n].set_yticks(np.arange(len(regs_r)), regs_r, fontsize=1)       
+                   
+                [t.set_color(i) for (i,t) in
+                    zip([pal[reg] for reg in regs_c],
+                    axs[n].xaxis.get_ticklabels())] 
+         
+                [t.set_color(i) for (i,t) in    
+                    zip([pal[reg] for reg in regs_r],
+                    axs[n].yaxis.get_ticklabels())]
+            
+                axs[n].set_title(f'{clustering}, resl{resl}', fontsize=10)
+                cbar = plt.colorbar(ims,fraction=0.046, pad=0.04, 
+                            extend='neither')#, ticks=[0, 0.5, 1]
+                cbar.ax.tick_params(labelsize=5)
+                                
+                n=n+1
+
         else:
             for k in k_range:
                 res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
@@ -1266,32 +1705,28 @@ def plot_all_connectivity_matrices(mapping='Beryl', nclus=7, nd=2, k_range=[2,3,
                     zip([pal[reg] for reg in regs_r],
                     axs[n].yaxis.get_ticklabels())]
             
-                axs[n].set_title(f'{metric}, {clustering}, {k}', fontsize=10)
+                axs[n].set_title(f'{clustering}, k{k}', fontsize=10)
                 cbar = plt.colorbar(ims,fraction=0.046, pad=0.04, 
                             extend='neither')#, ticks=[0, 0.5, 1]
                 cbar.ax.tick_params(labelsize=5)
-                
-                listr[f'{clustering}_{k}'] = regs_r
-                
+                                
                 n=n+1
                 
     
     fig.suptitle(vers)
     fig.tight_layout()
     fig.savefig(Path(pth_dmn.parent, 'figs', 
-                    f'all_connectivity_matrices_{vers}.pdf'), 
+                    f'all_connectivity_matrices_{vers}_{algo}.pdf'), 
                 dpi=400)
-    np.save(Path(pth_dmn.parent, 'res', 
-                 f'all_connectivity_matrices_listr_{vers}.npy'), 
-            listr, allow_pickle=True)
 
 
-def plot_avg_peth_from_clustering(vers, clustering, k=None):
-    d = get_umap_dist(algo='umap_z', vers=vers)
+
+def plot_avg_peth_from_clustering(vers, clustering, k=None, resl=None):
+    d = get_reg_dist(algo='umap_z', vers=vers)
     _, regs_r, _, info0 = clustering_on_connectivity_matrix(
-        d['res'], d['regs'], k=k, clustering=clustering)
-    info0 = np.sort(info0)
-    r = regional_group(mapping='Beryl', algo='umap_z', vers=vers, nclus=7)
+        d['res'], d['regs'], k=k, clustering=clustering, resl=resl)
+    info0 = np.sort(info0) # sort cluster labels for regions
+    r = regional_group(mapping='Beryl', algo='umap_z', vers=vers, nclus=7) # get peth data
 
     feat = 'concat_z'
     fg, axx = plt.subplots(nrows=len(np.unique(info0)),
@@ -1345,7 +1780,8 @@ def plot_avg_peth_from_clustering(vers, clustering, k=None):
     #axx.set_ylabel(feat)
     fg.tight_layout()
     fg.savefig(Path(one.cache_dir,'dmn', 'figs',
-       f'{vers}_avg_peth_from_{clustering}_k{k}.png'), dpi=150, bbox_inches='tight')
+       f'{vers}_avg_peth_from_{clustering}_k{k}_resl{resl}.png'), dpi=150, bbox_inches='tight')
+
 
 def plot_avg_peth_from_all_clustering(vers, nd=2, rerun=False, k_range=[2,3,4,5,6]):
 
@@ -1364,7 +1800,7 @@ def plot_avg_peth_from_all_clustering(vers, nd=2, rerun=False, k_range=[2,3,4,5,
                         allow_pickle=True).flat[0]
         else:
             metric = 'umap_z'
-            d = get_umap_dist(algo=metric, vers=vers, rerun=rerun)
+            d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)
 
         # perform clustering and plot results
         if n<5: # first five methods without a k value
@@ -1496,3 +1932,462 @@ def plot_avg_peth_from_all_clustering(vers, nd=2, rerun=False, k_range=[2,3,4,5,
         f'{vers}_avg_peth_from_all_clustering.png'), dpi=400, bbox_inches='tight')
 
 
+def plot_connectivity_network_style(vers, clustering, metric='umap_z', 
+                                    k=2, resl=1.01, layout='shell', coloring='Beryl',
+                                    diff='shifted', threshold=0.8, edge_display=0.1):
+
+    # get data from clustering
+    if vers == 'quie-rest-diff':
+        d = get_quiescence_resting_diff(metric=metric, diff=diff)
+    else:
+        d = get_reg_dist(algo=metric, vers=vers)
+    res = d['res']
+    regs = d['regs']    
+    res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
+            res, regs, k=k, metric=metric, clustering=clustering, resl=resl)
+
+    # Add graph nodes and edges with weights (connectivity strengths)
+    G = nx.Graph()
+    G.add_nodes_from(regs_r)
+    for i in range(len(regs_r)):
+        for j in range(i+1, len(regs_r)):  # Use only upper triangle for undirected graph
+            if res[i, j]!=0:  # Only add edges for nonzero connectivity
+                G.add_edge(regs_r[i], regs_r[j], weight=res[i, j])
+
+    # Define a layout for the nodes
+    if layout=='spring':
+        pos = nx.spring_layout(G)
+    elif layout=='shell':
+        pos = nx.shell_layout(G)
+    elif layout=='kamada':
+        pos = nx.kamada_kawai_layout(G)
+    elif layout=='manual': #manually put nodes in the same cluster near each other
+        pos = nx.kamada_kawai_layout(G)
+        clusters = np.sort(cluster_info)
+        for cluster in set(clusters):
+            cluster_nodes = regs_r[clusters==cluster]
+            cluster_center = np.mean([pos[node] for node in cluster_nodes], axis=0)
+            for node in cluster_nodes:
+                pos[node] = 0.05 * pos[node] + 0.95 * cluster_center
+    
+    # Draw nodes
+    fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(20, 11), dpi=200)
+    if coloring=='dmn':
+        cmap0 = cm.get_cmap('tab10')
+        cols = [cmap0(int(reg in dmn_regs)) for reg in G.nodes()]
+        transparency = 1
+    elif coloring=='cortical':
+        pal={}
+        for reg in G.nodes():
+            pal[reg] = 'white'
+            for cortical in cortical_regions.keys():
+                        if reg in cortical_regions[cortical]:
+                            pal[reg] = cortical_colors[cortical]
+        cols = [pal[reg] for reg in G.nodes()]
+        transparency = [(int(color!='white')+1)/2 for color in cols]
+    else:
+        _, pal = get_allen_info()
+        cols = [pal[reg] for reg in G.nodes()]
+        transparency = 1
+    cmap = cm.get_cmap('tab20')
+    node_colors = [cmap(i) for i in np.sort(cluster_info)]
+    nx.draw_networkx_nodes(G, pos, ax=axs[0], node_color=cols, alpha=transparency, node_size=40)
+    nx.draw_networkx_nodes(G, pos, ax=axs[1], node_color=node_colors, node_size=40)
+
+    # Draw edges with varying thickness based on connectivity strength
+    edges = G.edges(data=True)
+    strong_edges = [(i, j) for i, j, w in G.edges(data=True) if w['weight'] > threshold]
+    nx.draw_networkx_edges(G, pos, edgelist=strong_edges, ax=axs[0],
+        width=[d['weight']*edge_display for (u, v, d) in 
+               G.edges(data=True) if d['weight']> threshold])  # Adjust thickness based on weight
+    nx.draw_networkx_edges(G, pos, edgelist=strong_edges, ax=axs[1],
+        width=[d['weight']*edge_display for (u, v, d) in 
+               G.edges(data=True) if d['weight']> threshold])  # Adjust thickness based on weight
+
+    # Draw labels for the nodes
+    nx.draw_networkx_labels(G, pos, ax=axs[0], font_size=4)
+    nx.draw_networkx_labels(G, pos, ax=axs[1], font_size=4)
+
+    axs[0].set_title(f'colored by {coloring}', size=20)
+    axs[1].set_title(f'colored by {clustering} clustering', size=20)
+    fig.suptitle(f'{vers}, {clustering}', fontsize=40)
+
+    axs[0].axis('off')
+    axs[1].axis('off')
+    fig.tight_layout()
+    if clustering in ['spectralco', 'spectralbi', 'kmeans', 'kcenters', 'birch']:
+        fig.savefig(Path(pth_dmn.parent, 'figs', 
+                         f'network_{metric}_{clustering}_{vers}_k{k}_thr{threshold}_{layout}.pdf'), 
+                    dpi=200)
+        #np.save(Path(pth_dmn.parent, 'res', 
+        #                 f'cluster_info_{metric}_{clustering}_{vers}_k{k}.npy'),
+        #       cluster_info, allow_pickle=True)
+    elif clustering in ['louvain', 'leiden']:
+        fig.savefig(Path(pth_dmn.parent, 'figs', 
+                    f'network_{metric}_{clustering}_{vers}_{resl}_thr{threshold}_{layout}_{coloring}.pdf'), 
+                    dpi=200)
+    else:
+        fig.savefig(Path(pth_dmn.parent, 'figs', 
+                    f'network_{metric}_{clustering}_{vers}_thr{threshold}_{layout}_{coloring}.pdf'), 
+                    dpi=200)
+
+    plt.show()
+
+
+
+def plot_all_connectivity_networks(mapping='Beryl', algo='umap_z', nclus=7, nd=2, edge_display=0.1, k_range=[2,3,4,5,6,7],
+                                   resl_range=[1,1.01,1.02,1.03,1.04,1.05,1.06,1.07], threshold=0.9,
+                                   vers='concat', layout='shell', coloring='Beryl', rerun=False):
+
+    '''
+    network style connectivity plots for all clustering measures & parameters
+    '''
+
+    fig, axs = plt.subplots(nrows=7, ncols=len(k_range),
+                            figsize=(10,12), dpi=400)
+    axs = axs.flatten()
+    _,pal = get_allen_info()
+
+    n = 0
+    for clustering in ['hierarchy', 'hierarchy', 'louvain', 'leiden', 'birch',
+                       'spectralco', 'spectralbi', 'kmeans']:
+        if n==0:
+            metric='wass'
+            d = np.load(Path(pth_dmn, f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), 
+                        allow_pickle=True).flat[0]
+        else:
+            metric = algo
+            d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)            
+            
+        res0 = d['res']
+        regs = d['regs']
+
+        
+        if n<2:
+            res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
+                res0, regs, k=None, metric=metric, clustering=clustering)
+            
+            # Add graph nodes and edges with weights (connectivity strengths)
+            G = nx.Graph()
+            G.add_nodes_from(regs_r)
+            for i in range(len(regs_r)):
+                for j in range(i+1, len(regs_r)):  # Use only upper triangle for undirected graph
+                    if res[i, j]!=0:  # Only add edges for nonzero connectivity
+                        G.add_edge(regs_r[i], regs_r[j], weight=res[i, j])
+                        
+            # Define a layout for the nodes
+            if layout=='spring':
+                pos = nx.spring_layout(G)
+            elif layout=='shell':
+                pos = nx.shell_layout(G)
+            elif layout=='kamada':
+                pos = nx.kamada_kawai_layout(G)
+            elif layout=='manual': #manually put nodes in the same cluster near each other
+                pos = nx.kamada_kawai_layout(G)
+                clusters = np.sort(cluster_info)
+                for cluster in set(clusters):
+                    cluster_nodes = regs_r[clusters==cluster]
+                    cluster_center = np.mean([pos[node] for node in cluster_nodes], axis=0)
+                    for node in cluster_nodes:
+                        pos[node] = 0.1 * pos[node] + 0.9 * cluster_center
+                
+            # Plot graph
+            if coloring=='Beryl':
+                _, pal = get_allen_info()
+                cols = [pal[reg] for reg in G.nodes()]
+                nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=cols, node_size=2)
+            else:
+                cmap = cm.get_cmap('tab20')
+                node_colors = [cmap(i) for i in np.sort(cluster_info)]
+                nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=node_colors, node_size=4)
+
+            edges = G.edges(data=True)
+            strong_edges = [(i, j) for i, j, w in G.edges(data=True) if w['weight'] > threshold]
+            # Adjust thickness based on weight
+            nx.draw_networkx_edges(G, pos, edgelist=strong_edges, ax=axs[n], 
+                                   width=[d['weight']*edge_display for (u, v, d) in 
+                                          G.edges(data=True) if d['weight']> threshold]) 
+            if n==0:
+                axs[n].set_title(f'wass_{clustering}', fontsize=10)
+            else:
+                axs[n].set_title(f'{clustering}', fontsize=10)
+
+            #nx.draw_networkx_labels(G, pos, ax=axs[n], font_size=1)
+            axs[n].axis('off')
+            n=n+1
+
+        
+        elif clustering in ['louvain', 'leiden']:
+            for resl in resl_range:
+                res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
+                    res0, regs, resl=resl, metric=metric, clustering=clustering)
+                
+                # Add graph nodes and edges with weights (connectivity strengths)
+                G = nx.Graph()
+                G.add_nodes_from(regs_r)
+                for i in range(len(regs_r)):
+                    for j in range(i+1, len(regs_r)):  # Use only upper triangle for undirected graph
+                        if res[i, j]!=0:  # Only add edges for nonzero connectivity
+                            G.add_edge(regs_r[i], regs_r[j], weight=res[i, j])
+                            
+                # Define a layout for the nodes
+                if layout=='spring':
+                    pos = nx.spring_layout(G)
+                elif layout=='shell':
+                    pos = nx.shell_layout(G)
+                elif layout=='kamada':
+                    pos = nx.kamada_kawai_layout(G)
+                elif layout=='manual': #manually put nodes in the same cluster near each other
+                    pos = nx.kamada_kawai_layout(G)
+                    clusters = np.sort(cluster_info)
+                    for cluster in set(clusters):
+                        cluster_nodes = regs_r[clusters==cluster]
+                        cluster_center = np.mean([pos[node] for node in cluster_nodes], axis=0)
+                        for node in cluster_nodes:
+                            pos[node] = 0.1 * pos[node] + 0.9 * cluster_center
+                
+                # Plot graph
+                if coloring=='Beryl':
+                    _, pal = get_allen_info()
+                    cols = [pal[reg] for reg in G.nodes()]
+                    nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=cols, node_size=2)
+                else:
+                    cmap = cm.get_cmap('tab20')
+                    node_colors = [cmap(i) for i in np.sort(cluster_info)]
+                    nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=node_colors, node_size=4)
+                edges = G.edges(data=True)
+                strong_edges = [(i, j) for i, j, w in G.edges(data=True) if w['weight'] > threshold]
+            
+                # Adjust thickness based on weight
+                nx.draw_networkx_edges(G, pos, edgelist=strong_edges, ax=axs[n], 
+                                   width=[d['weight']*edge_display for (u, v, d) in 
+                                          G.edges(data=True) if d['weight']> threshold]) 
+            
+                axs[n].set_title(f'{clustering}, resl{resl}', fontsize=10)
+                #nx.draw_networkx_labels(G, pos, ax=axs[n], font_size=1)
+                axs[n].axis('off')
+                n=n+1
+
+        else:
+            for k in k_range:
+                res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
+                    res0, regs, k=k, metric=metric, clustering=clustering)
+                
+                # Add graph nodes and edges with weights (connectivity strengths)
+                G = nx.Graph()
+                G.add_nodes_from(regs_r)
+                for i in range(len(regs_r)):
+                    for j in range(i+1, len(regs_r)):  # Use only upper triangle for undirected graph
+                        if res[i, j]!=0:  # Only add edges for nonzero connectivity
+                            G.add_edge(regs_r[i], regs_r[j], weight=res[i, j])
+                            
+                # Define a layout for the nodes
+                if layout=='spring':
+                    pos = nx.spring_layout(G)
+                elif layout=='shell':
+                    pos = nx.shell_layout(G)
+                elif layout=='kamada':
+                    pos = nx.kamada_kawai_layout(G)
+                elif layout=='manual': #manually put nodes in the same cluster near each other
+                    pos = nx.kamada_kawai_layout(G)
+                    clusters = np.sort(cluster_info)
+                    for cluster in set(clusters):
+                        cluster_nodes = regs_r[clusters==cluster]
+                        cluster_center = np.mean([pos[node] for node in cluster_nodes], axis=0)
+                        for node in cluster_nodes:
+                            pos[node] = 0.1 * pos[node] + 0.9 * cluster_center
+                
+                # Plot graph
+                if coloring=='Beryl':
+                    _, pal = get_allen_info()
+                    cols = [pal[reg] for reg in G.nodes()]
+                    nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=cols, node_size=2)
+                else:
+                    cmap = cm.get_cmap('tab20')
+                    node_colors = [cmap(i) for i in np.sort(cluster_info)]
+                    nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=node_colors, node_size=4)
+                edges = G.edges(data=True)
+                strong_edges = [(i, j) for i, j, w in G.edges(data=True) if w['weight'] > threshold]
+                
+                # Adjust thickness based on weight
+                nx.draw_networkx_edges(G, pos, edgelist=strong_edges, ax=axs[n], 
+                                   width=[d['weight']*edge_display for (u, v, d) in 
+                                          G.edges(data=True) if d['weight']> threshold]) 
+            
+            
+                axs[n].set_title(f'{clustering}, k{k}', fontsize=10)
+                #nx.draw_networkx_labels(G, pos, ax=axs[n], font_size=1)
+                axs[n].axis('off')
+                n=n+1
+                
+    
+    fig.suptitle(vers)
+    fig.tight_layout()
+    fig.savefig(Path(pth_dmn.parent, 'figs', 
+                    f'all_connectivity_networks_{coloring}_{vers}_{algo}_{threshold}_{layout}.pdf'), 
+                dpi=400)
+
+
+
+def plot_connec_networks_over_time(clustering, layout='manual', nclus=13, nd=2, edge_display=0.1,
+                                   k=None, resl=None, threshold=0.9, top_n=100, metric='umap_z', 
+                                   coloring='Beryl', rerun=False):
+
+    '''
+    network style connectivity plots for all clustering measures & parameters
+    '''
+
+    fig, axs = plt.subplots(nrows=3, ncols=3,
+                            figsize=(9,10), dpi=400)
+    axs = axs.flatten()
+    _,pal = get_allen_info()
+
+    n = 0
+    for vers in ['concat', 'resting', 'quiescence', 'pre-stim-prior', 
+                 'stim_surp_con', 'stim_surp_incon', 'motor_init', 'fback1', 'fback0']:
+        if metric=='wass':
+            d = np.load(Path(pth_dmn, f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), 
+                        allow_pickle=True).flat[0]
+        else:
+            d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)            
+            
+        res0 = d['res']
+        regs = d['regs']
+
+        if layout=='shell':
+            # order regions by canonical list 
+            p = (Path(iblatlas.__file__).parent / 'beryl.npy')
+            regs_can = br.id2acronym(np.load(p), mapping='Beryl')
+            regs_r,reg_ord = [],[]
+            for reg in regs_can:
+                if reg in regs:
+                    regs_r.append(reg)
+                    reg_ord.append(np.where(regs==reg)[0][0])
+
+            res=res0[reg_ord]
+            #coloring='Beryl'
+        else:
+            res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
+                res0, regs, k=k, resl=resl, metric=metric, clustering=clustering)
+            
+        # Add graph nodes and edges with weights (connectivity strengths)
+        G = nx.Graph()
+        G.add_nodes_from(regs_r)
+        for i in range(len(regs_r)):
+            for j in range(i+1, len(regs_r)):  # Use only upper triangle for undirected graph
+                if res[i, j]!=0:  # Only add edges for nonzero connectivity
+                        G.add_edge(regs_r[i], regs_r[j], weight=res[i, j])
+                        
+        # Define a layout for the nodes
+        if layout=='spring':
+                pos = nx.spring_layout(G)
+        elif layout=='shell':
+                pos = nx.shell_layout(G)
+        elif layout=='kamada':
+                pos = nx.kamada_kawai_layout(G)
+        elif layout=='manual': #manually put nodes in the same cluster near each other
+                pos = nx.kamada_kawai_layout(G)
+                clusters = np.sort(cluster_info)
+                for cluster in set(clusters):
+                    cluster_nodes = regs_r[clusters==cluster]
+                    cluster_center = np.mean([pos[node] for node in cluster_nodes], axis=0)
+                    for node in cluster_nodes:
+                        pos[node] = 0.1 * pos[node] + 0.9 * cluster_center
+                
+        # Plot graph
+        if coloring=='Beryl':
+                _, pal = get_allen_info()
+                cols = [pal[reg] for reg in G.nodes()]
+                nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=cols, node_size=2)
+        elif coloring=='dmn':
+                cmap = cm.get_cmap('tab10')
+                node_colors = [cmap(int(reg in dmn_regs)) for reg in G.nodes()]
+                nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=node_colors, node_size=4)
+        elif coloring=='cortical':
+                pal={}
+                for reg in G.nodes():
+                    pal[reg] = 'white'
+                    for cortical in cortical_regions.keys():
+                        if reg in cortical_regions[cortical]:
+                            pal[reg] = cortical_colors[cortical]
+                node_colors = [pal[reg] for reg in G.nodes()]
+                transparency = [(int(color!='white')+1)/2 for color in node_colors]
+                nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=node_colors, 
+                                       alpha=transparency, node_size=4)
+        else:
+                cmap = cm.get_cmap('tab20')
+                node_colors = [cmap(i) for i in np.sort(cluster_info)]
+                nx.draw_networkx_nodes(G, pos, ax=axs[n], node_color=node_colors, node_size=4)
+
+        edges = G.edges(data=True)
+        strong_edges = [(i, j) for i, j, w in G.edges(data=True) if w['weight'] > threshold]
+        # Adjust thickness based on weight
+        nx.draw_networkx_edges(G, pos, edgelist=strong_edges, ax=axs[n], 
+                                   width=[d['weight']*edge_display for (u, v, d) in 
+                                          G.edges(data=True) if d['weight']> threshold]) 
+        axs[n].set_title(f'{vers}', fontsize=10)
+
+        #nx.draw_networkx_labels(G, pos, ax=axs[n], font_size=1)
+        axs[n].axis('off')
+        n=n+1
+                
+    if layout=='shell':
+        fig.suptitle(f'canonical ordering')
+    else:
+        fig.suptitle(f'{metric}_{clustering}_k{k}_resl{resl}')
+    fig.tight_layout()
+    if layout=='shell':
+        fig.savefig(Path(pth_dmn.parent, 'figs', 
+                    f'conn_networks_over_time_{metric}_{coloring}_{threshold}_{layout}.pdf'), 
+                    dpi=400)
+    else:
+        fig.savefig(Path(pth_dmn.parent, 'figs', 
+                    f'conn_networks_over_time_{metric}_{coloring}_{clustering}_k{k}resl{resl}_{threshold}_{layout}.pdf'), 
+                    dpi=400)
+
+
+
+def plot_avg_corr_with_dmn_regions(vers, metric='umap_z', rerun=False, cols_dictr=None,
+                                   only_cortical=False):
+
+    if cols_dictr==None:
+        r_a = regional_group('Beryl', 'umap_z', vers='concat', nclus=13)
+        cols_dictr = dict(list(Counter(zip(r_a['acs'], r_a['cols']))))
+
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(6,4), label=f'{vers}', dpi=150)
+    cmap = cm.get_cmap('tab10')
+
+    d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)
+    dmn_idx = [list(d['regs']).index(reg) for reg in dmn_regs]
+    if only_cortical:
+        cortical_list = np.concatenate(list(cortical_regions.values()))
+        cortical_list = set(cortical_list) & set(d['regs'])
+        cortical_idx = [list(d['regs']).index(reg) for reg in cortical_list]
+        d['res'] = d['res'][:,cortical_idx]
+        ndmn_idx = [list(d['regs']).index(reg) for reg in cortical_list
+                    if reg not in dmn_regs]
+        d['regs'] = d['regs'][cortical_idx]
+    else:
+        ndmn_idx = [list(d['regs']).index(reg) for reg in d['regs']
+                    if reg not in dmn_regs]
+    avg_corr_dmn = np.mean(d['res'][dmn_idx,:], axis=0)
+    avg_corr_ndmn = np.mean(d['res'][ndmn_idx,:], axis=0)
+
+    order = np.argsort(avg_corr_dmn)
+    colors = [cmap(int(reg in dmn_regs)) for reg in d['regs'][order]]
+    ax.scatter(d['regs'][order], avg_corr_dmn[order], color=colors, s=7, label='with dmn regs')
+    ax.scatter(d['regs'][order], avg_corr_ndmn[order], color=colors, s=5, marker='v', label='with non-dmn regs')
+    ax.set_xticks(np.arange(len(d['regs'])), d['regs'][order], rotation=90, fontsize=4)
+    [t.set_color(i) for (i,t) in
+        zip([cols_dictr[reg] for reg in d['regs'][order]],
+        ax.xaxis.get_ticklabels())]
+    ax.set_title(f'{vers}, average correlation per region', size=10)
+    ax.legend()
+
+    fig.tight_layout
+    if only_cortical:
+        fig.savefig(Path(one.cache_dir,'dmn', 'figs', 
+                     f'{vers}_avg_corr_dmn_cortical.pdf'), dpi=150)
+    else:
+        fig.savefig(Path(one.cache_dir,'dmn', 'figs', 
+                     f'{vers}_avg_corr_dmn.pdf'), dpi=150)
