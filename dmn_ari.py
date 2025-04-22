@@ -7,6 +7,7 @@ from iblatlas.regions import BrainRegions
 import iblatlas
 from iblatlas.plots import plot_swanson_vector 
 from brainbox.io.one import SessionLoader
+from granger import get_volume, get_centroids, get_res, get_structural, get_ari
 
 import sys
 sys.path.append('Dropbox/scripts/IBL/')
@@ -29,6 +30,7 @@ from scipy.spatial import distance
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform, cdist
 from sklearn.preprocessing import StandardScaler
+from sklearn.manifold import SpectralEmbedding
 from random import shuffle
 from sklearn.linear_model import LogisticRegression
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
@@ -44,11 +46,13 @@ from pathlib import Path
 import random
 from copy import deepcopy
 import time, sys, math, string, os
-from scipy.stats import spearmanr, zscore, linregress
+from scipy.stats import spearmanr, zscore, linregress, combine_pvalues
 import umap
 from itertools import combinations, chain
 from datetime import datetime
 import scipy.ndimage as ndi
+from rastermap import Rastermap
+import scipy.cluster.hierarchy as sch
 #import hdbscan
 
 from matplotlib.axis import Axis
@@ -68,6 +72,10 @@ from matplotlib.pyplot import cm
 from venny4py.venny4py import *
 import networkx as nx
 from termcolor import colored
+import dataframe_image as dfi
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.stats import chi2
+# from scipy.stats import norm
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -120,13 +128,88 @@ PETH_types_dict = {
     'quiescence': ['quiescence'],
     'pre-stim-prior': ['blockL', 'blockR'],
     'block50': ['block50'],
-    'stim_all': ['stimLbRcL','stimRbLcR','stimLbLcL', 'stimRbRcR'],
     'stim_surp_incon': ['stimLbRcL','stimRbLcR'],
     'stim_surp_con': ['stimLbLcL', 'stimRbRcR'],
-    #'resp_surp': ['fback0sRbL', 'fback0sLbR'],
+    'stim_all': ['stimLbRcL','stimRbLcR','stimLbLcL', 'stimRbRcR'],
+    'mistake': ['stimLbRcR', 'stimLbLcR', 'stimRbLcL', 'stimRbRcL',
+                'sLbRchoiceR', 'sLbLchoiceR', 'sRbLchoiceL', 'sRbRchoiceL'],
     'motor_init': ['motor_init'],
+    'movement': ['choiceL', 'choiceR'],
     'fback1': ['fback1'],
-    'fback0': ['fback0']}  
+    'fback0': ['fback0']}      
+
+data_lengths={'inter_trial': 72,
+              'blockL': 144,
+              'blockR': 144,
+              'block50': 144,
+              'quiescence': 144,
+              'stimLbLcL': 96,
+              'stimLbRcL': 96,
+              'stimLbRcR': 96,
+              'stimLbLcR': 96,
+              'stimRbLcL': 96,
+              'stimRbRcL': 96,
+              'stimRbRcR': 96,
+              'stimRbLcR': 96,
+              'motor_init': 72,
+              'sLbLchoiceL': 72,
+              'sLbRchoiceL': 72,
+              'sLbRchoiceR': 72,
+              'sLbLchoiceR': 72,
+              'sRbLchoiceL': 72,
+              'sRbRchoiceL': 72,
+              'sRbRchoiceR': 72,
+              'sRbLchoiceR': 72,
+              'choiceL': 72,
+              'choiceR': 72,
+              'fback1': 144,
+              'fback0': 144
+             }
+
+
+peth_ila = [
+    r"$\mathrm{rest}$",
+    r"$\mathrm{L_b}$",
+    r"$\mathrm{R_b}$",
+    r"$\mathrm{50_b}$",
+    r"$\mathrm{quies}$",
+    r"$\mathrm{L_sL_cL_b, s}$",
+    r"$\mathrm{L_sL_cR_b, s}$",
+    r"$\mathrm{L_sR_cR_b, s}$",
+    r"$\mathrm{L_sR_cL_b, s}$",
+    r"$\mathrm{R_sL_cL_b, s}$",
+    r"$\mathrm{R_sL_cR_b, s}$",
+    r"$\mathrm{R_sR_cR_b, s}$",
+    r"$\mathrm{R_sR_cL_b, s}$",
+    r"$\mathrm{move}$",
+    r"$\mathrm{L_sL_cL_b, m}$",
+    r"$\mathrm{L_sL_cR_b, m}$",
+    r"$\mathrm{L_sR_cR_b, m}$",
+    r"$\mathrm{L_sR_cL_b, m}$",
+    r"$\mathrm{R_sL_cL_b, m}$",
+    r"$\mathrm{R_sL_cR_b, m}$",
+    r"$\mathrm{R_sR_cR_b, m}$",
+    r"$\mathrm{R_sR_cL_b, m}$",
+    r"$\mathrm{L_c}$",
+    r"$\mathrm{R_c}$",
+    r"$\mathrm{feedbk1}$",
+    r"$\mathrm{feedbk0}$"
+]
+peth_dict = dict(zip(tts__, peth_ila))
+
+
+phases_dict = {
+    'concat': 'concat',
+    'resting': 'resting',
+    'quiescence': 'quiescence',
+    'pre-stim-prior': 'pre-stim prior',
+    'stim_surp_incon': 'stim surprise',
+    'stim_surp_con': 'stim congruent',
+    'mistake': 'mistake',
+    'motor_init': 'motor init',
+    'movement': 'movement',
+    'fback1': 'fback correct',
+    'fback0': 'fback incorrect'}      
 
 
 cortical_regions = {
@@ -168,6 +251,35 @@ cortical_colors = {"Prefrontal": 'r',
 dmn_regs = ['ACAd', 'ACAv', 'PL', 'ILA', 'ORBl', 'ORBm', 
             'ORBvl', 'VISa', 'VISam', 'RSPagl','RSPd', 
             'RSPv', 'SSp-tr', 'SSp-ll', 'MOs']
+
+
+networks = {
+    'concat_1': 'VISp',
+    'concat_2': 'PRM',
+    'quiescence_1': 'DP',
+    'quiescence_2': 'GRN',
+    'pre-stim-prior_1': 'VISp',
+    'pre-stim-prior_2': 'MRN',
+    'movement_1': 'MOs',
+    'movement_2': 'VISp',
+    'movement_3': 'CA1',
+    'mistake_1': 'PRNr',
+    'mistake_2': 'ORBvl',
+    'mistake_3': 'SUB',
+    'stim_surp_incon_1': 'VISp',
+    'stim_surp_incon_2': 'GRN',
+    'stim_surp_con_1': 'VAL',
+    'stim_surp_con_2': 'IP',
+    'stim_surp_con_3': 'VISp',
+    'motor_init_1': 'VISp',
+    'motor_init_2': 'CP',
+    'motor_init_3': 'IP',
+    'fback1_1': 'VISp',
+    'fback1_2': 'GRN',
+    'fback1_3': 'CA1',
+    'fback0_1': 'CA1',
+    'fback0_2': 'PRNr'
+}
 
 
 def put_panel_label(ax, k):
@@ -267,13 +379,27 @@ def cosine_sim(v0, v1):
 
 
 
-def get_reg_dist(rerun=False, algo='umap_z', 
-                  mapping='Beryl', vers='concat'):
+def get_reg_dist(rerun=False, algo='umap_z', control=False,
+                  mapping='Beryl', vers='concat', shuffling=False):
 
-    pth_ = Path(one.cache_dir, 'dmn', 
+    if control!=False:
+        if shuffling:
+            pth_ = Path(one.cache_dir, 'dmn', 
+                f'{algo}_{mapping}_{vers}_control{control}_smooth_shuffled.npy')
+        else:
+            pth_ = Path(one.cache_dir, 'dmn', 
+                f'{algo}_{mapping}_{vers}_control{control}_smooth.npy')
+    else:
+        if shuffling:
+            pth_ = Path(one.cache_dir, 'dmn', 
+                f'{algo}_{mapping}_{vers}_smooth_shuffled.npy')
+        else:
+            pth_ = Path(one.cache_dir, 'dmn', 
                 f'{algo}_{mapping}_{vers}_smooth.npy')
+        
     if (not pth_.is_file() or rerun):
-        res, regs = smooth_dist(algo=algo, mapping=mapping, vers=vers)    
+        res, regs = smooth_dist(algo=algo, mapping=mapping, vers=vers, 
+                                shuffling=shuffling, control=control)    
         d = {'res': res, 'regs' : regs}
         np.save(pth_, d, allow_pickle=True)
     else:
@@ -316,7 +442,7 @@ def clustering_on_peth_data(r, algo='concat_z', k=2, clustering='kmeans', min_s=
         clustering_result = KMeans(n_clusters=k, random_state=random_state).fit(res)
         clusters = clustering_result.labels_
         r['centers'] = clustering_result.cluster_centers_
-        #print(clustering_result.inertia_)
+        print(clustering_result.inertia_)
 
     else:
         print('what clustering method?')
@@ -326,8 +452,8 @@ def clustering_on_peth_data(r, algo='concat_z', k=2, clustering='kmeans', min_s=
 
 
 def regional_group(mapping, algo, vers='concat', norm_=False, min_s=10, eps=0.5,
-                   run_umap=False, n_neighbors=10, d=0.2, ncomp=2,
-                   nclus = 7, random_seed = 0):
+                   run_umap=False, run_pca=False, n_neighbors=10, d=0.2, ncomp=2,
+                   nclus = 13, random_seed = 0):
 
     '''
     find group labels for all cells
@@ -335,7 +461,11 @@ def regional_group(mapping, algo, vers='concat', norm_=False, min_s=10, eps=0.5,
     algo: concat_z(original high-dim data) or umap_z(2d dim-reduced data)
     '''
 
-    r = np.load(Path(pth_dmn, f'{vers}_norm{norm_}.npy'),
+    if vers=='concat0':
+        r = np.load('/Users/ariliu/Downloads/concat_ephysTrue.npy',
+                 allow_pickle=True).flat[0]
+    else:
+        r = np.load(Path(pth_dmn, f'{vers}_norm{norm_}.npy'),
                  allow_pickle=True).flat[0]
                  
                               
@@ -343,7 +473,7 @@ def regional_group(mapping, algo, vers='concat', norm_=False, min_s=10, eps=0.5,
         r['umap_z'] = umap.UMAP(random_state=random_seed, n_components=ncomp, min_dist=d, 
                              n_neighbors=n_neighbors).fit_transform(r['concat_z'])
 
-    if algo=='pca_z':
+    if run_pca==True:
         r['pca_z'] = PCA(n_components=ncomp).fit_transform(r['concat_z'])
                    
 
@@ -490,18 +620,25 @@ def regional_group(mapping, algo, vers='concat', norm_=False, min_s=10, eps=0.5,
 
 
 
-def smooth_dist(algo='umap_z', mapping='Beryl', show_imgs=False,
-                norm_=True, dendro=True, nmin=30, vers='concat'):
+def smooth_dist(algo='umap_z', mapping='Beryl', show_imgs=False, shuffling=False,
+                norm_=True, dendro=True, nmin=30, vers='concat', control=False):
 
     '''
     smooth 2d pointclouds, show per class
     norm_: normalize smoothed image by max brightness
     '''
 
-    r = regional_group(mapping, algo, vers=vers)
+    if control!=False:
+        r = regional_group(mapping, algo, vers=vers, norm_='False_control'+control)
+    else: 
+        r = regional_group(mapping, algo, vers=vers)
     feat = 'concat_z' if algo[-1] == 'z' else 'concat'
     fontsize = 12
-    
+
+    if shuffling:
+        # randomly shuffle the region labels as a control for clustering
+        random.shuffle(r['acs'])
+        
     # Define grid size and density kernel size
     x_min = np.floor(np.min(r[algo][:,0]))
     x_max = np.ceil(np.max(r[algo][:,0]))
@@ -516,7 +653,7 @@ def smooth_dist(algo='umap_z', mapping='Beryl', show_imgs=False,
               for reg in regs00}    
 
     if mapping == 'Beryl':
-        # oder regions 
+        # order regions 
         p = (Path(iblatlas.__file__).parent / 'beryl.npy')
         regsord = dict(zip(br.id2acronym(np.load(p), 
                            mapping='Beryl'),
@@ -731,8 +868,8 @@ def compare_distance_metrics_scatter(vers, nclus=7, nd=2, rerun=False):
     plt.show()
 
 
-def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clustering='hierarchy', 
-                                      random_state=0, resl=1.01):
+def clustering_on_connectivity_matrix(res, regs, k=4, metric='umap_z', clustering='hierarchy', 
+                                      random_state=0, resl=1.01, tau=0.01):
     if clustering=='hierarchy': # Order the matrix using hierarchical clustering
         
         if metric in ['umap_z', 'pca_z']: # convert similarity scores to distances
@@ -753,6 +890,34 @@ def clustering_on_connectivity_matrix(res, regs, k=2, metric='umap_z', clusterin
             
         res = res[:, ordered_indices][ordered_indices, :]
         cluster_info = hierarchy.fcluster(linkage_matrix, 10, criterion='maxclust')
+
+    elif clustering == 'spectral_cutoff': # spectral clustering but with a cutoff tau
+        embedding = SpectralEmbedding(n_components=k, affinity='precomputed')
+        eigenvectors = embedding.fit_transform(res)
+        projection_magnitudes = np.linalg.norm(eigenvectors, axis=1)
+        strong_points = projection_magnitudes >= tau
+        V_filtered = eigenvectors[strong_points]
+        cluster_labels_filtered = KMeans(n_clusters=k, random_state=random_state).fit_predict(V_filtered)
+        
+        labels = np.full(res.shape[0], -1)  # Initialize all as unassigned (-1)
+        labels[strong_points] = cluster_labels_filtered
+        cluster_info = labels[strong_points]
+        ordered_indices = np.argsort(labels[strong_points])
+        regs_r = np.array(regs)[ordered_indices]
+        regs_c = regs_r
+        res = res[:, ordered_indices][ordered_indices, :]         
+
+    elif clustering == 'ICA_cutoff': # ICA component projection with a cutoff tau
+        # convert similarity to distance
+        res0 = np.copy(res)
+        res = np.amax(res) - res
+        # apply ICA and project data onto components
+        ica = FastICA(n_components=k, random_state=random_state)
+        ica_features = ica.fit_transform(res)
+        # get networks that can overlap (unlike in other cases which are disjoint clusters!)
+        cluster_info = (np.abs(ica_features) >= tau).astype(int)        
+        regs_r = regs
+        regs_c = regs_r
 
     elif clustering == 'spectralco': # Order the matrix using spectral co-clustering
         clustering_result = SpectralCoclustering(n_clusters=k, random_state=random_state).fit(res)
@@ -873,19 +1038,143 @@ def get_quiescence_resting_diff(metric='umap_z', diff='shifted'):
     return d
 
 
+def get_all_clustering_results(clustering, metric='umap_z', nclus=13, nd=2, 
+                               k=None, resl=1.01, tau=0.01, rerun=False):
+
+    '''   
+    '''
+
+    clusters, regs_ordered = {}, {}
+    for vers in ['concat', 'resting', 'quiescence', 'quie-rest-diff-shifted', 'quie-rest-diff-abs', 
+                 'pre-stim-prior', 'mistake', 'stim_all',
+                 'stim_surp_con', 'stim_surp_incon', 'motor_init', 'fback1', 'fback0']:
+        if metric=='wass':
+            d = np.load(Path(pth_dmn, f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), 
+                        allow_pickle=True).flat[0]
+        elif vers=='quie-rest-diff-shifted':
+            d = get_quiescence_resting_diff(metric=metric, diff='shifted')
+        elif vers=='quie-rest-diff-abs':
+            d = get_quiescence_resting_diff(metric=metric, diff='abs')
+        elif metric in ['umap_z', 'pca_z']:
+            d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)            
+            
+        res = d['res']
+        regs = d['regs']
+        _, _, regs, cluster_info = clustering_on_connectivity_matrix(
+            res, regs, k=k, metric=metric, clustering=clustering, resl=resl, tau=tau)
+        clusters[vers] = np.sort(cluster_info)
+        regs_ordered[vers] = regs
+        
+    return clusters, regs_ordered
+
+
+def find_cluster_overlap_between_paired_conditions(clusters, ids, vers0, vers1, threshold=2):
+    overlaps=[]
+    for i in set(clusters[vers0]):
+        for j in set(clusters[vers1]):
+            overlap = set(ids[vers0][clusters[vers0]==i]) & set(ids[vers1][clusters[vers1]==j])
+            if len(overlap)>threshold:
+                overlaps.append(overlap)
+
+    return overlaps
+
+def find_overlaps(x0, x1):
+    overlaps=[]
+    for i in range(len(x0)):
+        for j in range(len(x1)):
+            overlap = x0[i] & x1[j]
+            if len(overlap) > 2:
+                overlaps.append(overlap)
+    return overlaps
+
+
+def find_cluster_overlap_all_conditions(vers, clustering='louvain', k=5):
+    '''
+    vers includes all conditions to be considered
+    '''
+
+    clusters, regs_ordered = get_all_clustering_results(clustering, k=k)
+    for n in range(int(len(vers)/2)+1):
+        if n==0:
+            x0 = find_cluster_overlap_between_paired_conditions(clusters, regs_ordered, 
+                                                                vers[n], vers[len(vers)-n-1])
+        else:
+            x1 = find_cluster_overlap_between_paired_conditions(clusters, regs_ordered, 
+                                                                vers[n], vers[len(vers)-n-1])
+            x0 = find_overlaps(x0, x1)
+    return x0
+
+
+def get_all_highd_clustering_results(clustering, algo='concat_z', vers='concat', norm_=False, nclus=13,  
+                                     min_s=10, eps=0.5, random_seed=0):
+
+    '''
+    get clustering results on high-d original feature vectors
+    for all possible time windows/ conditions
+    '''
+
+    clusters, neurons_xyz, neurons_uuids, neurons_ids = {}, {}, {}, {}
+    for vers in ['concat', 'resting', 'quiescence', 'pre-stim-prior', 'mistake', 'stim_all',
+                 'stim_surp_con', 'stim_surp_incon', 'motor_init', 'fback1', 'fback0']:
+        r = np.load(Path(pth_dmn, f'{vers}_norm{norm_}.npy'),
+                 allow_pickle=True).flat[0]
+        r, cluster_info = clustering_on_peth_data(r, algo=algo, k=nclus, 
+                                              clustering=clustering, 
+                                              min_s=min_s, eps=eps, 
+                                              random_state=random_seed)
+        
+        clusters[vers] = cluster_info
+        neurons_xyz[vers] = r['xyz']
+        neurons_uuids[vers] = r['uuids']
+        neurons_ids[vers] = r['ids']
+        
+    return clusters, neurons_xyz, neurons_uuids, neurons_ids
+
+
+def find_highd_cluster_overlap_all_conditions(vers, clusters, neurons_uuids, threshold=10):
+    '''
+    vers includes all conditions to be considered
+    '''
+
+    for n in range(int(len(vers)/2)+1):
+        if n==0:
+            x0 = find_cluster_overlap_between_paired_conditions(clusters, neurons_uuids, 
+                                                                vers[n], vers[len(vers)-n-1],
+                                                                threshold=threshold)
+        else:
+            x1 = find_cluster_overlap_between_paired_conditions(clusters, neurons_uuids, 
+                                                                vers[n], vers[len(vers)-n-1],
+                                                                threshold=threshold)
+            x0 = find_overlaps(x0, x1, threshold=threshold)
+    return x0
+
+
+def rgb_color_text(color, text):
+    r=color[0]
+    g=color[1]
+    b=color[2]
+    return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
+
+def print_conserved_region_groups_colored(conserved):
+    _, pal = get_allen_info()
+    for i in range(len(conserved)):
+        print(f'group {i}')
+        colors=[tuple(int(c * 255) for c in pal[reg][:3]) for reg in conserved[i]]
+        for j in range(len(colors)):
+            print(rgb_color_text(colors[j], list(conserved[i])[j]))
+
+
 
 '''
 plotting
 '''
 
-
 def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl', norm_=False,
-                       run_umap=False, ncomp=2, n_neighbors=15, d=0.1,
-                       min_s=10, eps=0.5, 
-                       means=False, exa=False, shuf=False,
-                       exa_squ=False, vers='concat', ax=None, ds=0.5,
+                       run_umap=False, ncomp=2, n_neighbors=15, d=0.1, min_s=10, eps=0.5, 
+                       means=False, exa=False, shuf=False, ds=0.5,
+                       exa_squ=False, vers='concat', ax=None, control=False, cross_val=False,
                        axx=None, exa_clus=False, leg=False, restr=None,
-                       nclus = 7, random_seed=0):
+                       nclus = 13, random_seed=0):
                        
     '''
     2 dims being pca on concat PETH; 
@@ -903,10 +1192,26 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl', nor
     '''
     
     feat = 'concat_z'
+    if control!=False:
+        norm_ = 'False_control'+control+'_0'
     
     r = regional_group(mapping, algo_data, vers=vers, norm_=norm_, min_s=min_s,
                        eps=eps, run_umap=run_umap, n_neighbors=n_neighbors, d=d,
                        ncomp=ncomp, nclus=nclus, random_seed=random_seed)
+
+    if cross_val: # plot one set using results sorted from another set of trials
+        norm_ = 'False_control'+control+'_1'
+        r1 = regional_group(mapping, algo_data, vers=vers, norm_=norm_, min_s=min_s,
+                       eps=eps, run_umap=run_umap, n_neighbors=n_neighbors, d=d,
+                       ncomp=ncomp, nclus=nclus, random_seed=random_seed)
+        r_cells = [cell in r1['uuids'] for cell in r['uuids']]
+        r1_cells = [cell in r['uuids'] for cell in r1['uuids']]
+        r1['cols'] = r['cols'][r_cells]
+        r1['acs'] = r['acs'][r_cells]
+        r1['umap_z'] = r1['umap_z'][r1_cells]
+        r1['concat_z'] = r1['concat_z'][r1_cells]
+        r = r1
+        
     alone = False
     if not ax:
         alone = True
@@ -974,7 +1279,7 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl', nor
     if alone:
         fig.tight_layout()
     fig.savefig(Path(one.cache_dir,'dmn', 'figs',
-        f'{algo}_{vers}_{mapping}_{nclus}_{algo_data}_{ncomp}d_{d}_{n_neighbors}.pdf'), dpi=200, bbox_inches='tight')
+        f'{algo}_{vers}_norm{norm_}_{mapping}_{nclus}_{algo_data}_{ncomp}d_{d}_{n_neighbors}.pdf'), dpi=200, bbox_inches='tight')
 
 
     if exa:
@@ -1076,7 +1381,7 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl', nor
         if alone:
             fg.tight_layout()
         fg.savefig(Path(one.cache_dir,'dmn', 'figs',
-            f'{vers}_{mapping}_clusters_{nclus}_{algo_data}.pdf'), dpi=150, bbox_inches='tight')
+            f'{vers}_norm{norm_}_{mapping}_clusters_{nclus}_{algo_data}.pdf'), dpi=150, bbox_inches='tight')
 
 
     if exa_squ:
@@ -1168,7 +1473,8 @@ def plot_dim_reduction(algo_data='concat_z', algo='umap_z', mapping='Beryl', nor
 
 
 
-def clus_freqs(foc='cluster', mapping='kmeans', algo_data='concat_z', nmin=50, nclus=13, vers='concat', nd=2):
+def clus_freqs(foc='reg', mapping='kmeans', algo_data='concat_z', nmin=50, overrep='std',
+               nclus=13, vers='concat', nd=2, plot_wass=False, plot_hierarchy=False):
 
     '''
     For each k-means cluster, show an Allen region bar plot of frequencies,
@@ -1236,7 +1542,7 @@ def clus_freqs(foc='cluster', mapping='kmeans', algo_data='concat_z', nmin=50, n
                             hspace=0.225,
                             wspace=0.2)       
 
-    else:
+    elif foc=='reg':
 
         # show frequency of clusters for all regions
 
@@ -1304,14 +1610,19 @@ def clus_freqs(foc='cluster', mapping='kmeans', algo_data='concat_z', nmin=50, n
         fig.tight_layout()
         
         centers = r_k['centers']
-        plot_wasserstein_matrix(weights, centers, reg_ord, cols_dictr, vers=vers, nclus=nclus, nd=nd)
-        get_difference_from_flat_dist(weights, centers, reg_ord, cols_dictr, vers=vers, nclus=nclus, nd=nd)
+        if plot_wass:
+            plot_wasserstein_matrix(weights, centers, reg_ord, cols_dictr, vers=vers, nclus=nclus, nd=nd)
+        if plot_hierarchy:
+            get_difference_from_flat_dist(weights, centers, reg_ord, cols_dictr, vers=vers, nclus=nclus, nd=nd)
+
+        list_overrep = get_clus_overrep(nclus, weights, reg_ord, overrep=overrep)
 
     fig.savefig(Path(pth_dmn.parent, 'figs',
                      f'{foc}_{algo_data}_{nclus}_{vers}.png')) 
     
-    #if foc=='reg':
-    #    return weights, centers, reg_ord
+    if foc=='reg':
+    #    return weights, centers, reg_ord, list_overrep
+        return list_overrep
 
     
 def plot_wasserstein_matrix(weights, centers, reg_ord, cols_dictr, vers='concat', nclus=7, nd=2):
@@ -1357,15 +1668,38 @@ def plot_wasserstein_matrix(weights, centers, reg_ord, cols_dictr, vers='concat'
     save_wass['res'] = wass
     save_wass['regs'] = reg_ord
     np.save(Path(pth_dmn,f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), save_wass, allow_pickle=True)
-    
+
+
+def get_clus_overrep(nclus, weights, reg_ord, overrep='std'):
     # report if any cluster(s) overrepresented in a region
+    list_overrep={f'cluster{k}': [] for k in range(nclus)}
+    
     for i in range(len(weights)):
         if max(weights[i])<20:
             continue
-        if sum([2*x <= max(weights[i]) for x in weights[i]]) > nclus/2:
-            print(reg_ord[i], 'overrep cluster', weights[i].index(max(weights[i])))
-            if sum([2*x <= np.sort(weights[i])[::-1][1] for x in weights[i]]) > nclus/2:
-                print(reg_ord[i], 'overrep cluster', weights[i].index(np.sort(weights[i])[::-1][1]))
+            
+        if overrep=='std': 
+            #define overrep: at least one std over the mean
+            idx=0
+            for x in weights[i]:
+                if x > np.mean(weights[i])+np.std(weights[i]):
+                    list_overrep[f'cluster{idx}'].append(reg_ord[i])
+                    print(reg_ord[i], 'overrep cluster', idx)
+                idx = idx+1
+        else: 
+            #define overrep: at least 2x as large as cluster K's count for K in at least half of all the clusters
+            if sum([2*x <= max(weights[i]) for x in weights[i]]) > nclus/2: 
+                #first check if the max cluster is overrep
+                idx=weights[i].index(max(weights[i]))
+                list_overrep[f'cluster{idx}'].append(reg_ord[i])
+                print(reg_ord[i], 'overrep cluster', idx)
+                
+                if sum([2*x <= np.sort(weights[i])[::-1][1] for x in weights[i]]) > nclus/2: 
+                    #then check 2nd highest cluster
+                    idx=weights[i].index(np.sort(weights[i])[::-1][1])
+                    list_overrep[f'cluster{idx}'].append(reg_ord[i])
+                    print(reg_ord[i], 'overrep cluster', idx)
+    return list_overrep
 
 
 
@@ -1399,11 +1733,191 @@ def plot_wasserstein_matrix_from_data(vers='concat', nd=2, nclus=7):
 
 
 
-def get_difference_from_flat_dist(weights, centers, reg_ord, cols_dictr=None, vers='concat', nclus=13, nd=2):
+def plot_xyz(mapping='Beryl', algo='concat_z', vers='concat', add_cents=False, nclus=13, save_fig=True,
+             restr=False, restr_cell=False, name='all', print_name=False, ax=None, exa=False):
+
     '''
-    Calculate wasserstein distance between the k-means clusters distributions and a flat distribution
+    3d plot of feature per cell
+    add_cents: superimpose stars for region volumes and centroids
+    exa: show example average feature vectors
+    restr: a list of regions to be displayed
+    restr_cell: a list of cells to be displayed
+    name: identifier of the network being displayed, if restricted to a specific network of regions (restr!=False)
+    '''
+
+    r = regional_group(mapping, algo=algo, vers=vers, nclus=nclus)
+
+    if ((mapping in tts__) or (mapping in PETH_types_dict)):
+        cmap = mpl.cm.get_cmap('Spectral')
+        norm = mpl.colors.Normalize(vmin=min(r['rankings']), 
+                                    vmax=max(r['rankings']))
+        cols = cmap(norm(r['rankings']))
+        r['cols'] = cols
+
+    xyz = r['xyz']*1000  #convert to mm
+    
+    alone = False
+    if not ax:
+        alone = True
+        fig = plt.figure(figsize=(8.43,7.26), label=mapping)
+        ax = fig.add_subplot(111,projection='3d')
+
+    scalef = 1.2                  
+    ax.view_init(elev=45.78, azim=-33.4)
+    ax.set_xlim(min(xyz[:,0])/scalef, max(xyz[:,0])/scalef)
+    ax.set_ylim(min(xyz[:,1])/scalef, max(xyz[:,1])/scalef)
+    ax.set_zlim(min(xyz[:,2])/scalef, max(xyz[:,2])/scalef)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+
+    if isinstance(restr, list):
+        idcs = np.bitwise_or.reduce([r['acs'] == reg for reg in restr])   
+        xyz = xyz[idcs]
+        r['cols'] = np.array(r['cols'])[idcs]
+        r['acs'] = np.array(r['acs'])[idcs]        
+    elif isinstance(restr_cell, list):
+        idcs = np.bitwise_or.reduce([r['uuids'] == uuid for uuid in restr_cell])   
+        xyz = xyz[idcs]
+        r['cols'] = np.array(r['cols'])[idcs]
+        r['acs'] = np.array(r['acs'])[idcs]
+    
+    ax.scatter(xyz[:,0], xyz[:,1],xyz[:,2], 
+               marker='o', s = 1 if alone else 0.5, c=r['cols'])
+               
+    if add_cents:
+        # add centroids with size relative to volume
+        if mapping !='Beryl':
+            print('add cents only for Beryl')
+            
+        else:    
+            regs = list(Counter(r['acs']))
+            centsd = get_centroids()
+            cents = np.array([centsd[x] for x in regs])          
+            volsd = get_volume()
+            vols = [volsd[x] for x in regs]
+
+            if restr_cell!=False:
+                scale = 10000
+            else:
+                scale = 5000
+            vols = scale * np.array(vols)/np.max(vols)
+            
+            _,pa = get_allen_info()
+            cols = [pa[reg] for reg in regs]
+            ax.scatter(cents[:,0], cents[:,1], cents[:,2], 
+                       marker='*', s = vols, color=cols)
+                       
+    fontsize = 14
+    ax.set_xlabel('x [mm]', fontsize = fontsize)
+    ax.set_ylabel('y [mm]', fontsize = fontsize)
+    ax.set_zlabel('z [mm]', fontsize = fontsize)
+    ax.tick_params(axis='both', labelsize=12)
+    #ax.set_title(f'Mapping: {mapping}')
+    ax.grid(False)
+    nbins = 3
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=nbins))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=nbins))
+    ax.zaxis.set_major_locator(MaxNLocator(nbins=nbins))
+
+    if ((mapping in tts__) or (mapping in PETH_types_dict)):
+        # Create a colorbar based on the colormap and normalization
+        mappable = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
+        mappable.set_array(r['rankings'])  # Set the data array for the colorbar
+        cbar = fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10)
+        cbar.set_label(f'mean {mapping} rankings')
+
+    if alone:
+        ax.set_title(f'{mapping}_{vers}_{name}')
+        if print_name==True:
+            plt.figtext(0.5, 0.9, restr, ha='center', fontsize=10)
+        fig.tight_layout()
+        if save_fig:
+            fig.savefig(Path(one.cache_dir,'dmn', 'figs',
+                f'{mapping}_{vers}_{name}_3d.png'),dpi=150)
+
+    if exa:
+        # add example time series; 20 from max to min equally spaced 
+        if (mapping not in tts__) and (mapping not in PETH_types_dict):
+            print('not implemented for other mappings')
+            return
+
+        
+        feat = 'concat_bd'
+        nrows = 10  # show 5 top cells in the ranking and 5 last
+        rankings_s = sorted(r['rankings'])
+        indices = [list(r['rankings']).index(x) for x in
+                    np.concatenate([rankings_s[:nrows//2], 
+                                    rankings_s[-nrows//2:]])]
+
+        fg, axx = plt.subplots(nrows=nrows,
+                                   sharex=True, sharey=False,
+                                   figsize=(7,7))                   
+
+        xx = np.arange(len(r[feat][0]))/c_sec 
+
+        kk = 0             
+        for ind in indices:
+                                
+            yy = r[feat][ind]
+
+            axx[kk].plot(xx, yy,
+                     color=r['cols'][ind],
+                     linewidth=2)
+
+            sss = (r['acs'][ind] + '\n' + str(r['pid'][ind][:3]))
+
+
+            axx[kk].set_ylabel(sss)
+
+            if kk != (len(indices) -1):
+                axx[kk].spines['top'].set_visible(False)
+                axx[kk].spines['right'].set_visible(False)
+                axx[kk].spines['bottom'].set_visible(False)                
+            else:
+
+                axx[kk].spines['top'].set_visible(False)
+                axx[kk].spines['right'].set_visible(False)
+                #axx[kk].spines['left'].set_visible(False)      
+                #axx[kk].tick_params(left=False, labelleft=False)
+                       
+            # plot vertical boundaries for windows
+            h = 0
+            for i in r['len']:
+            
+                xv = r['len'][i] + h
+                axx[kk].axvline(xv/c_sec, linestyle='--', linewidth=1,
+                            color='grey')
+                
+                ccc = ('r' if ((i == mapping) or 
+                        (i in PETH_types_dict[mapping])) else 'k')
+
+                if  kk == 0:            
+                    axx[kk].text(xv/c_sec - r['len'][i]/(2*c_sec), max(yy),
+                             '   '+i, rotation=90, 
+                             color=ccc, 
+                             fontsize=10, ha='center')
+            
+                h += r['len'][i] 
+            kk += 1                
+
+#        #axx.set_title(f'{s} \n {len(pts)} points in square')
+        axx[kk - 1].set_xlabel('time [sec]')
+
+        fg.suptitle(f'mapping: {mapping}, feat: {feat}')
+        fg.tight_layout()
+
+
+
+def get_difference_from_flat_dist(weights, centers, reg_ord, cols_dictr=None, vers='concat', nclus=13, nd=2):
+    
+    '''
+    Calculate wasserstein distance between the k-means clusters distributions and a flat distribution, 
+    then plot the correlation with cortical hierarchy
     centers: the centers of the k clusters
-    weights: count for each of the k clusters in each region
+    weights: count for each of the k clusters in each region; 
+             len(weights)=number of brain regions=len(reg_ord)
+    reg_ord: ordered list of brain regions
     '''
     
     wass = np.zeros(len(weights))
@@ -1465,8 +1979,9 @@ def get_difference_from_flat_dist(weights, centers, reg_ord, cols_dictr=None, ve
 
 
 
-def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=2, resl=1.01,
-                             vers='concat', ax0=None, clustering='hierarchy', rerun=False):
+def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=2, resl=1.01, 
+                             ticktype='rectangles', vers='concat', ax0=None, clustering='louvain', 
+                             diff='shifted', rerun=False, shuffling=False):
 
     '''
     all-to-all matrix for some measures
@@ -1480,10 +1995,12 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
     elif metric == 'wass':
         d = np.load(Path(pth_dmn, f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), 
                     allow_pickle=True).flat[0]
-    elif vers == 'quie-rest-diff':
-        d = get_quiescence_resting_diff(metric=metric)
+    elif vers == 'quie-rest-diff-shifted':
+        d = get_quiescence_resting_diff(metric=metric, diff='shifted')
+    elif vers == 'quie-rest-diff-abs':
+        d = get_quiescence_resting_diff(metric=metric, diff='abs')
     else:     
-        d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)
+        d = get_reg_dist(algo=metric, vers=vers, rerun=rerun, shuffling=shuffling)
                 
     res = d['res']
     regs = d['regs']
@@ -1538,29 +2055,67 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
         
     
     ims = ax0.imshow(res, origin='lower', interpolation=None)
-    ax0.set_xticks(np.arange(len(regs_c)), regs_c,
-                   rotation=90, fontsize=5)
-    ax0.set_yticks(np.arange(len(regs_r)), regs_r, fontsize=5)       
-                   
-    [t.set_color(i) for (i,t) in
-        zip([pal[reg] for reg in regs_c],
-        ax0.xaxis.get_ticklabels())] 
-         
-    [t.set_color(i) for (i,t) in    
-        zip([pal[reg] for reg in regs_r],
-        ax0.yaxis.get_ticklabels())]
+    if ticktype == 'acronyms':
+        ax0.set_xticks(np.arange(len(regs_c)), regs_c,
+                       rotation=90, fontsize=2.5)
+        ax0.set_yticks(np.arange(len(regs_r)), regs_r, fontsize=2.5)       
+                       
+        [t.set_color(i) for (i,t) in
+            zip([pal[reg] for reg in regs_c],
+            ax0.xaxis.get_ticklabels())] 
+             
+        [t.set_color(i) for (i,t) in    
+            zip([pal[reg] for reg in regs_r],
+            ax0.yaxis.get_ticklabels())]
+                
+    else:
+        # plot region rectangles
+        rect_height = 15 
+        data_height = len(regs_c)
+        
+        x_tick_colors = [to_rgba(pal[reg]) for reg in regs_c]
+        ax0.axis('off')
+
+        for i, color in enumerate(x_tick_colors):
+            rect = Rectangle((i - 0.5, -rect_height - 0.5), 1, 
+                       rect_height, color=color, clip_on=False,
+                       transform=ax0.transData)
+            ax0.add_patch(rect)
+
+        # Create colored rectangles for y-axis ticks
+        y_tick_colors = [to_rgba(pal[reg]) for reg in regs_c]
+
+
+        for i, color in enumerate(y_tick_colors):
+            rect = Rectangle((-rect_height - 0.5, i - 0.5),
+                              rect_height, 
+                              1, color=color, clip_on=False,
+                              transform=ax0.transData)
+            ax0.add_patch(rect)         
+                    
     
     if metric[-1] == 'e':
         vers = '30 ephysAtlas'
         
-    ax0.set_title(f'{metric}, {vers}')
+    #ax0.set_title(f'{metric}, {vers}')
     #ax0.set_ylabel(mapping)
-    cbar = plt.colorbar(ims,fraction=0.046, pad=0.04, 
-                        extend='neither')#, ticks=[0, 0.5, 1]
+    #cbar = plt.colorbar(ims,fraction=0.046, pad=0.04, 
+    #                    extend='neither')#, ticks=[0, 0.5, 1]
+    ax0.set_facecolor('none')
     #cbar.ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
 
+    # Compute and plot cluster boundaries
+    cluster_ids, cluster_sizes = np.unique(cluster_info, return_counts=True)
+    start_idx = 0
+    for size in cluster_sizes:
+        # Draw a square around the cluster
+        rect = patches.Rectangle((start_idx, start_idx), size, size, 
+                                 linewidth=2, edgecolor='black', facecolor='none')
+        ax0.add_patch(rect)
+        start_idx += size
+
+    # Plot dendrogram if hierarchical clustering
     if clustering=='hierarchy':
-        # plot dendrogram
         with plt.rc_context({'lines.linewidth': 0.5}):
             hierarchy.dendrogram(linkage_matrix, ax=ax_dendro, 
                 orientation='left', labels=regs)
@@ -1579,20 +2134,18 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
     plt.subplots_adjust(wspace=0.05)
     fig.tight_layout()
     if clustering in ['spectralco', 'spectralbi', 'kmeans', 'kcenters', 'birch']:
-        fig.savefig(Path(pth_dmn.parent, 'figs', 
-                         f'connectivity_matrix_{metric}_{clustering}_{vers}_k{k}.pdf'), 
-                    dpi=200)
+        name = f'connectivity_matrix_{metric}_{clustering}_{vers}_k{k}'
         #np.save(Path(pth_dmn.parent, 'res', 
         #                 f'cluster_info_{metric}_{clustering}_{vers}_k{k}.npy'),
         #       cluster_info, allow_pickle=True)
     elif clustering in ['louvain', 'leiden']:
-        fig.savefig(Path(pth_dmn.parent, 'figs', 
-                         f'connectivity_matrix_{metric}_{clustering}_{vers}_{resl}.pdf'), 
-                    dpi=200)
+        name = f'connectivity_matrix_{metric}_{clustering}_{vers}_{resl}'
     else:
-        fig.savefig(Path(pth_dmn.parent, 'figs', 
-                         f'connectivity_matrix_{metric}_{clustering}_{vers}.pdf'), 
-                    dpi=200)
+        name = f'connectivity_matrix_{metric}_{clustering}_{vers}'
+
+    if shuffling==True:
+        name = name + '_shuffled'
+    fig.savefig(Path(pth_dmn.parent, 'figs', f'{name}.pdf'), dpi=200, transparent=True)
         
         #np.save(Path(pth_dmn.parent, 'res', 
         #                 f'cluster_info_{metric}_{clustering}_{vers}.npy'),
@@ -1607,7 +2160,8 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
         return cluster_info
 
 
-def plot_all_connectivity_matrices(mapping='Beryl', algo='umap_z', nclus=7, nd=2, k_range=[2,3,4,5,6,7],
+
+def plot_all_connectivity_matrices(mapping='Beryl', algo='umap_z', nclus=13, nd=2, k_range=[2,3,4,5,6,7],
                                    resl_range=[1,1.01,1.02,1.03,1.04,1.05,1.06,1.07],
                                    vers='concat', ax0=None, rerun=False):
 
@@ -1721,40 +2275,48 @@ def plot_all_connectivity_matrices(mapping='Beryl', algo='umap_z', nclus=7, nd=2
 
 
 
-def plot_avg_peth_from_clustering(vers, clustering, k=None, resl=None):
-    d = get_reg_dist(algo='umap_z', vers=vers)
+def plot_avg_peth_from_vers(vers, metric='umap_z', clustering='louvain', 
+                                  nclus=7, nd=2, k=2, resl=1.01, rerun=False,
+                                  same_plot=True):
+    d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)
     _, regs_r, _, info0 = clustering_on_connectivity_matrix(
-        d['res'], d['regs'], k=k, clustering=clustering, resl=resl)
+            d['res'], d['regs'], k=k, metric=metric, clustering=clustering, resl=resl)
     info0 = np.sort(info0) # sort cluster labels for regions
-    r = regional_group(mapping='Beryl', algo='umap_z', vers=vers, nclus=7) # get peth data
+    r = regional_group(mapping='Beryl', algo=metric, vers=vers) # get peth data
 
     feat = 'concat_z'
-    fg, axx = plt.subplots(nrows=len(np.unique(info0)),
-                           sharex=True, sharey=False,
-                           figsize=(6,6))
+    if same_plot:
+        fg, axx = plt.subplots(figsize=(10,2))
+    else:
+        fg, axx = plt.subplots(nrows=len(np.unique(info0)),
+                               sharex=True, sharey=True,
+                               figsize=(6,6))
                         
-    kk = 0
-    for clu in np.unique(info0):
-            print('cluster:', clu)
+    #for clu in np.unique(info0):
+    for clu in range(3):
             
             #cluster mean
             listr = regs_r[info0==clu] #list of regions in a cluster
-            print('regs in the cluster:', listr)
+            #print('regs in the cluster:', listr)
             xx = np.arange(len(r[feat][0])) /480
             yy = np.mean(r[feat][np.where(np.isin(r['acs'], listr))], axis=0)
+            print('cluster:', clu, 'mean', np.mean(yy))
 
-            axx[kk].plot(xx, yy, linewidth=2)
-                     
-
-            
-            if kk != (len(np.unique(r['acs'])) - 1):
-                axx[kk].axis('off')
+            if same_plot:
+                axx.plot(xx, yy, linewidth=1)
+                axx.spines['top'].set_visible(False)
+                axx.spines['right'].set_visible(False)
             else:
-
-                axx[kk].spines['top'].set_visible(False)
-                axx[kk].spines['right'].set_visible(False)
-                axx[kk].spines['left'].set_visible(False)      
-                axx[kk].tick_params(left=False, labelleft=False)
+                axx[clu].plot(xx, yy, linewidth=1)
+                                 
+                if clu != (len(np.unique(r['acs'])) - 1):
+                    axx[clu].axis('off')
+                else:
+    
+                    axx[clu].spines['top'].set_visible(False)
+                    axx[clu].spines['right'].set_visible(False)
+                    axx[clu].spines['left'].set_visible(False)      
+                    axx[clu].tick_params(left=False, labelleft=False)
                 
             d2 = {}
             for sec in PETH_types_dict[vers]:
@@ -1765,22 +2327,260 @@ def plot_avg_peth_from_clustering(vers, clustering, k=None, resl=None):
             for i in d2:
             
                 xv = d2[i] + h
-                axx[kk].axvline(xv/480, linestyle='--', linewidth=1,
-                            color='grey')
+                if same_plot:
+                    axx.axvline(xv/480, linestyle='--', linewidth=0.75,
+                                color='grey')
+                    if clu==0:
+                        axx.text(xv/480 - d2[i]/(2*480), max(yy),
+                                 '   '+i, rotation=90, color='k', 
+                                 fontsize=10, ha='center')
+                else:
+                    axx[clu].axvline(xv/480, linestyle='--', linewidth=0.75,
+                                    color='grey')
                 
-                if  kk == 0:            
-                    axx[kk].text(xv/480 - d2[i]/(2*480), max(yy),
-                             '   '+i, rotation=90, color='k', 
-                             fontsize=10, ha='center')
+                    if  clu==0:   
+                        axx[clu].text(xv/480 - d2[i]/(2*480), max(yy),
+                                 '   '+i, rotation=90, color='k', 
+                                 fontsize=10, ha='center')
             
                 h += d2[i] 
-            kk += 1
-        
-    axx[kk - 1].set_xlabel('time [sec]')
+
+    #axx[kk - 1].set_xlabel('time [sec]')
     #axx.set_ylabel(feat)
     fg.tight_layout()
     fg.savefig(Path(one.cache_dir,'dmn', 'figs',
        f'{vers}_avg_peth_from_{clustering}_k{k}_resl{resl}.png'), dpi=150, bbox_inches='tight')
+
+
+def plot_avg_peth_networks(vers, networks, metric='umap_z', clustering='louvain', 
+                           resl=1.01, rerun=False, rename=False, same_plot=False):
+    '''
+    plot avg peth from networks defined from networks dict (reliable networks from split trial controls)
+    also plot randomly shuffled peths as controls
+    '''
+
+    participation_networks = get_regional_participation_all_networks(networks=networks,
+                                                                     clustering=clustering,
+                                                                     rename=rename)
+    d = get_reg_dist(algo='umap_z', vers='concat')
+    regs = d['regs']
+    
+    r = regional_group(mapping='Beryl', algo=metric, vers=vers) # get peth data
+    feat = 'concat_z'
+                        
+    clusters = [network for network in networks if network.startswith(vers)]
+    if same_plot:
+        fg, axx = plt.subplots(figsize=(10,2), dpi=200)
+    else:
+        fg, axx = plt.subplots(nrows=len(clusters),
+                               sharex=True, sharey=True,
+                               figsize=(6,6), dpi=200)
+
+    kk=0
+    for clu in clusters:
+
+        weights = participation_networks[clu]
+        # filter out cells not in regs (void or undefined)
+        mask = np.isin(r['acs'], regs)
+        filtered_feat = r[feat][mask]
+        # calculated weighted average based on regional participation in the cluster
+        mapped_weights = np.array([weights[list(regs).index(reg)] for reg in r['acs'][mask]])
+        yy = np.average(filtered_feat, axis=0, weights=mapped_weights)                
+        xx = np.arange(len(r[feat][0])) /480
+        #print('cluster:', clu, 'mean', np.mean(yy))
+
+        # create randomly shuffled controls
+        n_permutations = 100
+        controls = []
+        for _ in range(n_permutations):
+            shuffled_weights = np.random.permutation(mapped_weights)
+            control_yy = np.average(filtered_feat, axis=0, weights=shuffled_weights)
+            controls.append(control_yy)
+        controls = np.array(controls)
+        #p_value = np.mean(controls >= yy)
+        #print(clu, 'p_val', p_value)
+    
+        if same_plot:
+            axx.plot(xx, yy, linewidth=1)
+            for control in controls:
+                axx.plot(xx, control, color='gray', alpha=0.2, linewidth=0.1)
+            axx.spines['top'].set_visible(False)
+            axx.spines['right'].set_visible(False)
+        else:
+            axx[kk].plot(xx, yy, linewidth=1)
+            for control in controls:
+                axx[kk].plot(xx, control, color='gray', alpha=0.2, linewidth=0.1)                             
+            axx[kk].spines['top'].set_visible(False)
+            axx[kk].spines['right'].set_visible(False)
+            #axx[kk].spines['left'].set_visible(False)      
+            #axx[kk].tick_params(left=False, labelleft=False)
+                
+            d2 = {}
+            for sec in PETH_types_dict[vers]:
+                d2[sec] = r['len'][sec]
+                                
+            # plot vertical boundaries for windows
+            h = 0
+            for i in d2:
+            
+                xv = d2[i] + h
+                if same_plot:
+                    axx.axvline(xv/480, linestyle='--', linewidth=0.75,
+                                color='grey')
+                    if kk==0:
+                        axx.text(xv/480 - d2[i]/(2*480), max(yy),
+                                 '   '+i, rotation=90, color='k', 
+                                 fontsize=10, ha='center')
+                else:
+                    axx[kk].axvline(xv/480, linestyle='--', linewidth=0.75,
+                                    color='grey')
+                
+                    if  kk==0:   
+                        axx[kk].text(xv/480 - d2[i]/(2*480), max(yy),
+                                 '   '+i, rotation=90, color='k', 
+                                 fontsize=10, ha='center')
+            
+                h += d2[i] 
+
+        kk+=1
+
+    #axx[kk - 1].set_xlabel('time [sec]')
+    #axx.set_ylabel(feat)
+    fg.tight_layout()
+    fg.savefig(Path(one.cache_dir,'dmn', 'figs',
+       f'{vers}_avg_peth_wcontrols_{clustering}_resl{resl}.pdf'), dpi=150, bbox_inches='tight')
+
+
+
+def plot_avg_peth_all_vers(vers_list, metric='umap_z', clustering='louvain', 
+                                  nclus=7, nd=2, k=2, resl=1.01, rerun=False,
+                                  same_plot=True):
+    '''
+    for each vers in vers_list, plot avg peth for first three clusters from clustering results
+    '''
+    
+    fg, axx = plt.subplots(nrows=len(vers_list),
+                           figsize=(12, 1.5*len(vers_list)))
+
+    kk=0
+    for vers in vers_list:
+        d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)
+        _, regs_r, _, info0 = clustering_on_connectivity_matrix(
+                d['res'], d['regs'], k=k, metric=metric, clustering=clustering, resl=resl)
+        info0 = np.sort(info0) # sort cluster labels for regions
+        r = regional_group(mapping='Beryl', algo=metric, vers=vers) # get peth data
+    
+        feat = 'concat_z'
+                        
+        #for clu in np.unique(info0):
+        for clu in range(3):
+                
+                #cluster mean
+                listr = regs_r[info0==clu] #list of regions in a cluster
+                #print('regs in the cluster:', listr)
+                xx = np.arange(len(r[feat][0])) /480
+                yy = np.mean(r[feat][np.where(np.isin(r['acs'], listr))], axis=0)
+                #print('cluster:', clu, 'mean', np.mean(yy))
+    
+                axx[kk].plot(xx, yy, linewidth=1)
+            
+                axx[kk].spines['top'].set_visible(False)
+                axx[kk].spines['right'].set_visible(False)
+                axx[kk].tick_params(left=False, labelleft=False)
+                    
+                d2 = {}
+                for sec in PETH_types_dict[vers]:
+                    d2[sec] = r['len'][sec]
+                                    
+                # plot vertical boundaries for windows
+                h = 0
+                for i in d2:
+                
+                    xv = d2[i] + h
+                    axx[kk].axvline(xv/480, linestyle='--', linewidth=0.75,
+                                    color='grey')
+                    if clu==0:
+                        axx[kk].text(xv/480 - d2[i]/(2*480), max(yy),
+                                     peth_dict[i],
+                                     rotation=90, color='k', 
+                                     fontsize=10, ha='center')
+                
+                    h += d2[i]
+        kk+=1
+        
+    #axx[kk - 1].set_xlabel('time [sec]')
+    #axx.set_ylabel(feat)
+    fg.tight_layout()
+    fg.savefig(Path(one.cache_dir,'dmn', 'figs',
+       f'avg_peth_all_clusters_{clustering}_resl{resl}.pdf'), dpi=150, bbox_inches='tight')
+
+
+def plot_avg_peth_all_networks(networks, clustering='louvain', resl=1.01, rename=False,
+                               show_name=False):
+
+    participation_networks = get_regional_participation_all_networks(networks=networks,
+                                                                     clustering=clustering,
+                                                                     rename=rename)
+    d = get_reg_dist(algo='umap_z', vers='concat')
+    regs = d['regs']
+    vers_list = [network.rsplit('_', 1)[0] for network in networks]
+    vers_list = list(dict.fromkeys(vers_list))
+    fg, axx = plt.subplots(nrows=len(vers_list),
+                           figsize=(12, 1.5*len(vers_list)))
+
+    kk=0
+    for vers in vers_list:
+        r = regional_group(mapping='Beryl', algo='umap_z', vers=vers) # get peth data    
+        feat = 'concat_z'
+
+        clusters = [network for network in networks if network.startswith(vers)]                        
+        for clu in clusters:
+
+            weights = participation_networks[clu]
+            # filter out cells not in regs (void or undefined)
+            mask = np.isin(r['acs'], regs)
+            filtered_feat = r[feat][mask]
+            # calculated weighted average based on regional participation in the cluster
+            mapped_weights = np.array([weights[list(regs).index(reg)] for reg in r['acs'][mask]])
+            yy = np.average(filtered_feat, axis=0, weights=mapped_weights)                
+            xx = np.arange(len(r[feat][0])) /480
+            #print('cluster:', clu, 'mean', np.mean(yy))
+            axx[kk].plot(xx, yy, linewidth=0.5)
+
+            d2 = {}
+            for sec in PETH_types_dict[vers]:
+                d2[sec] = r['len'][sec]
+                                
+            # plot vertical boundaries for windows
+            h = 0
+            for i in d2:
+            
+                xv = d2[i] + h
+                axx[kk].axvline(xv/480, linestyle='--', linewidth=0.25,
+                                color='grey')
+                if show_name:
+                    if clu.rsplit('_', 1)[1]=='1':
+                        axx[kk].text(xv/480 - d2[i]/(2*480), max(yy),
+                                     peth_dict[i],
+                                     rotation=90, color='k', 
+                                     fontsize=10, ha='center')
+            
+                h += d2[i]
+                    
+        axx[kk].spines['top'].set_visible(False)
+        axx[kk].spines['right'].set_visible(False)
+        axx[kk].tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)                    
+
+        axx[kk].set_facecolor('none')
+        kk+=1
+        
+    #axx[kk - 1].set_xlabel('time [sec]')
+    #axx.set_ylabel(feat)
+    fg.tight_layout()
+    fg.savefig(Path(one.cache_dir,'dmn', 'figs',
+       f'avg_peth_weighted_networks_{clustering}_resl{resl}.pdf'), dpi=150, 
+               bbox_inches='tight', transparent=True)
+
 
 
 def plot_avg_peth_from_all_clustering(vers, nd=2, rerun=False, k_range=[2,3,4,5,6]):
@@ -1932,27 +2732,110 @@ def plot_avg_peth_from_all_clustering(vers, nd=2, rerun=False, k_range=[2,3,4,5,
         f'{vers}_avg_peth_from_all_clustering.png'), dpi=400, bbox_inches='tight')
 
 
-def plot_connectivity_network_style(vers, clustering, metric='umap_z', 
-                                    k=2, resl=1.01, layout='shell', coloring='Beryl',
-                                    diff='shifted', threshold=0.8, edge_display=0.1):
+def get_regional_participation_all_networks(networks, clustering='louvain', rename=True):
+    participation_networks={}
+    d = get_reg_dist(algo='umap_z', vers='concat')
+    regs = d['regs']
+    control_list=[False, 'ver0_0', 'ver0_1', 'ver1_0', 'ver1_1',
+                  'ver2_0', 'ver2_1', 'ver3_0', 'ver3_1']
+    
+    for network in networks:
+        vers=network.rsplit('_', 1)[0]
+        net_id=network.rsplit('_', 1)[1]
+        reg=networks[network]
+        
+        regs_ordered, clusters = get_cluster_membership_across_controls(control_list, 
+                                                                        vers, 
+                                                                        clustering)    
+        
+        # Get network participation ratio
+        participation=np.zeros(len(regs))
+        for control in control_list:
+            clus_id=int(clusters[control][regs_ordered[control]==reg]) # get clus id from representative reg in clus
+            regs_in_clus=regs_ordered[control][clusters[control]==clus_id] # find all other regs in this cluster
+            participation=participation + [reg in regs_in_clus for reg in regs]
+        
+        participation=participation/np.max(participation)
+        phase=phases_dict[vers]
+        if rename:
+            participation_networks[f'{phase}_{net_id}']=participation
+        else:
+            participation_networks[network]=participation
+
+    return participation_networks
+
+def get_reproducible_clusters_with_controls(control_list, vers='concat', clustering='louvain'):
+    
+    regs_ordered, clusters = get_cluster_membership_across_controls(control_list,
+                                                                    vers=vers,
+                                                                    clustering=clustering)   
+    for n in range(int(len(control_list)/2)+1):
+        if n==0:
+            x0 = find_cluster_overlap_between_paired_conditions(clusters, regs_ordered, 
+                                                                control_list[n], control_list[len(control_list)-n-1])
+        else:
+            x1 = find_cluster_overlap_between_paired_conditions(clusters, regs_ordered, 
+                                                                control_list[n], control_list[len(control_list)-n-1])
+            x0 = find_overlaps(x0, x1)
+    return x0
+
+
+def get_cluster_membership_across_controls(control_list, vers='concat', clustering='louvain'):
+    clusters, regs_ordered = {}, {}
+    for control in control_list:
+        d = get_reg_dist(algo='umap_z', vers=vers, control=control)
+        res = d['res']
+        regs = d['regs']
+        _, _, regs, cluster_info = clustering_on_connectivity_matrix(res, regs, clustering=clustering)
+        clusters[control] = np.sort(cluster_info)
+        regs_ordered[control] = regs
+
+    return regs_ordered, clusters
+
+
+def plot_connectivity_network_style(vers, clustering, control_list=None, metric='umap_z', tau=0.01, 
+                                    k=2, resl=1.01, layout='manual', coloring='Beryl', labels=False,
+                                    diff='shifted', threshold=0, edge_display=0.5, 
+                                    simplify_clusters=True, amplify=1):
 
     # get data from clustering
-    if vers == 'quie-rest-diff':
-        d = get_quiescence_resting_diff(metric=metric, diff=diff)
+    if vers == 'quie-rest-diff-shifted':
+        d = get_quiescence_resting_diff(metric=metric, diff='shifted')
+    elif vers == 'quie-rest-diff-abs':
+        d = get_quiescence_resting_diff(metric=metric, diff='abs')
     else:
         d = get_reg_dist(algo=metric, vers=vers)
     res = d['res']
     regs = d['regs']    
     res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
-            res, regs, k=k, metric=metric, clustering=clustering, resl=resl)
+            res, regs, k=k, metric=metric, clustering=clustering, resl=resl, tau=tau)
+
+    if control_list!=None:
+        x0=get_reproducible_clusters_with_controls(control_list, vers=vers, clustering=clustering)
+        cluster_info=np.full(len(regs_r), -1, dtype=int)
+        included_regs=[]
+        for i in range(len(x0)):
+            for reg in x0[i]:
+                idx=np.where(regs_r==reg)[0][0]
+                cluster_info[idx]=i
+                included_regs.append(idx)
+        cluster_info = cluster_info[included_regs]
 
     # Add graph nodes and edges with weights (connectivity strengths)
-    G = nx.Graph()
-    G.add_nodes_from(regs_r)
-    for i in range(len(regs_r)):
-        for j in range(i+1, len(regs_r)):  # Use only upper triangle for undirected graph
-            if res[i, j]!=0:  # Only add edges for nonzero connectivity
-                G.add_edge(regs_r[i], regs_r[j], weight=res[i, j])
+    G = nx.Graph()    
+    if control_list==None:
+        G.add_nodes_from(regs_r)
+        for i in range(len(regs_r)):
+            for j in range(i+1, len(regs_r)):  # Use only upper triangle for undirected graph
+                if res[i, j]!=0:  # Only add edges for nonzero connectivity
+                    G.add_edge(regs_r[i], regs_r[j], weight=res[i, j])
+    else:
+        G.add_nodes_from(regs_r[included_regs])
+        for i in range(len(included_regs)):
+            for j in range(i+1, len(included_regs)):  # Use only upper triangle for undirected graph
+                if res[included_regs[i], included_regs[j]]!=0:  # Only add edges for nonzero connectivity
+                    G.add_edge(regs_r[included_regs[i]], regs_r[included_regs[j]], 
+                               weight=res[included_regs[i], included_regs[j]])
 
     # Define a layout for the nodes
     if layout=='spring':
@@ -1965,17 +2848,20 @@ def plot_connectivity_network_style(vers, clustering, metric='umap_z',
         pos = nx.kamada_kawai_layout(G)
         clusters = np.sort(cluster_info)
         for cluster in set(clusters):
-            cluster_nodes = regs_r[clusters==cluster]
+            if control_list==None:
+                 cluster_nodes = regs_r[clusters==cluster]
+            else:
+                 cluster_nodes = regs_r[included_regs][clusters==cluster]
             cluster_center = np.mean([pos[node] for node in cluster_nodes], axis=0)
             for node in cluster_nodes:
-                pos[node] = 0.05 * pos[node] + 0.95 * cluster_center
+                pos[node] = 0.1 * pos[node] + 0.9 * cluster_center
     
     # Draw nodes
     fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(20, 11), dpi=200)
     if coloring=='dmn':
         cmap0 = cm.get_cmap('tab10')
         cols = [cmap0(int(reg in dmn_regs)) for reg in G.nodes()]
-        transparency = 1
+        transparency = [(int(reg in dmn_regs)+1)/2 for reg in G.nodes()]
     elif coloring=='cortical':
         pal={}
         for reg in G.nodes():
@@ -1990,10 +2876,70 @@ def plot_connectivity_network_style(vers, clustering, metric='umap_z',
         cols = [pal[reg] for reg in G.nodes()]
         transparency = 1
     cmap = cm.get_cmap('tab20')
+    #if control_list!=None:
+    #    cluster_info = cluster_info[included_regs]
     node_colors = [cmap(i) for i in np.sort(cluster_info)]
     nx.draw_networkx_nodes(G, pos, ax=axs[0], node_color=cols, alpha=transparency, node_size=40)
     nx.draw_networkx_nodes(G, pos, ax=axs[1], node_color=node_colors, node_size=40)
 
+    
+    if simplify_clusters:
+        # Only show one edge of avg connectivity between cluster pairs
+
+        if amplify==None:
+            amplify=1/len(regs_r)
+        node_to_cluster = {node: cluster for node, cluster in zip(regs_r, np.sort(cluster_info))}
+        cluster_edges = {}
+        within_cluster_weights = {}
+        
+        # Compute inter-cluster and within-cluster connectivity        
+        for i in range(len(regs_r)):
+            for j in range(i+1, len(regs_r)):
+                #if res[i, j] != 0:  # Only consider nonzero connectivity
+                    cluster_i = node_to_cluster[regs_r[i]]
+                    cluster_j = node_to_cluster[regs_r[j]]
+        
+                    if cluster_i == cluster_j:  # Within-cluster connections
+                        if cluster_i not in within_cluster_weights:
+                            within_cluster_weights[cluster_i] = []
+                        within_cluster_weights[cluster_i].append(res[i, j])
+                    else:  # Between-cluster connections
+                        key = tuple(sorted((cluster_i, cluster_j)))  # Ensure consistent ordering
+                        if key not in cluster_edges:
+                            cluster_edges[key] = []
+                        cluster_edges[key].append(res[i, j])
+        
+        # Add only one edge between clusters, with average weight
+        for (c1, c2), weights in cluster_edges.items():
+            avg_weight = np.sum(weights)*amplify
+            
+            # Find a representative node pair between clusters
+            node_i, node_j = None, None
+            for i in range(len(regs_r)):
+                for j in range(i+1, len(regs_r)):
+                    if res[i, j] != 0:
+                        if node_to_cluster[regs_r[i]] == c1 and node_to_cluster[regs_r[j]] == c2:
+                            node_i, node_j = regs_r[i], regs_r[j]
+                            break
+                if node_i is not None:
+                    break
+            
+            if node_i and node_j:
+                G.add_edge(node_i, node_j, weight=avg_weight)
+
+        # Add self-loop edges for within-cluster connectivity
+        for cluster, weights in within_cluster_weights.items():
+            avg_weight = np.sum(weights)*amplify
+            
+            # Choose a representative node from the cluster to draw self-loop
+            cluster_nodes = [node for node, c in node_to_cluster.items() if c == cluster]
+            if cluster_nodes:
+                center_node = cluster_nodes[0]  # Pick the first node in the cluster
+                G.add_edge(center_node, center_node, weight=avg_weight)  # Self-loop
+                
+        threshold=1 # Set high threshold so that all other edges don't display
+
+    
     # Draw edges with varying thickness based on connectivity strength
     edges = G.edges(data=True)
     strong_edges = [(i, j) for i, j, w in G.edges(data=True) if w['weight'] > threshold]
@@ -2005,7 +2951,8 @@ def plot_connectivity_network_style(vers, clustering, metric='umap_z',
                G.edges(data=True) if d['weight']> threshold])  # Adjust thickness based on weight
 
     # Draw labels for the nodes
-    nx.draw_networkx_labels(G, pos, ax=axs[0], font_size=4)
+    if labels:
+        nx.draw_networkx_labels(G, pos, ax=axs[0], font_size=4)
     nx.draw_networkx_labels(G, pos, ax=axs[1], font_size=4)
 
     axs[0].set_title(f'colored by {coloring}', size=20)
@@ -2014,28 +2961,35 @@ def plot_connectivity_network_style(vers, clustering, metric='umap_z',
 
     axs[0].axis('off')
     axs[1].axis('off')
+    axs[0].set_facecolor('none')
+    axs[1].set_facecolor('none')
     fig.tight_layout()
+
+    if control_list!=None:
+        name=f'network_{metric}_{clustering}_{vers}_controlled'
+    else:
+        name=f'network_{metric}_{clustering}_{vers}'
+        
     if clustering in ['spectralco', 'spectralbi', 'kmeans', 'kcenters', 'birch']:
         fig.savefig(Path(pth_dmn.parent, 'figs', 
-                         f'network_{metric}_{clustering}_{vers}_k{k}_thr{threshold}_{layout}.pdf'), 
-                    dpi=200)
+                         f'{name}_k{k}_thr{threshold}_{layout}.pdf'), 
+                    dpi=200, transparent=True)
         #np.save(Path(pth_dmn.parent, 'res', 
         #                 f'cluster_info_{metric}_{clustering}_{vers}_k{k}.npy'),
         #       cluster_info, allow_pickle=True)
     elif clustering in ['louvain', 'leiden']:
         fig.savefig(Path(pth_dmn.parent, 'figs', 
-                    f'network_{metric}_{clustering}_{vers}_{resl}_thr{threshold}_{layout}_{coloring}.pdf'), 
-                    dpi=200)
+                    f'{name}_{resl}_thr{threshold}_{layout}_{coloring}.pdf'), 
+                    dpi=200, transparent=True)
     else:
         fig.savefig(Path(pth_dmn.parent, 'figs', 
-                    f'network_{metric}_{clustering}_{vers}_thr{threshold}_{layout}_{coloring}.pdf'), 
-                    dpi=200)
-
-    plt.show()
+                    f'{name}_thr{threshold}_{layout}_{coloring}.pdf'), 
+                    dpi=200, transparent=True)
 
 
 
-def plot_all_connectivity_networks(mapping='Beryl', algo='umap_z', nclus=7, nd=2, edge_display=0.1, k_range=[2,3,4,5,6,7],
+
+def plot_all_connectivity_networks(mapping='Beryl', algo='umap_z', nclus=13, nd=2, edge_display=0.1, k_range=[2,3,4,5,6,7],
                                    resl_range=[1,1.01,1.02,1.03,1.04,1.05,1.06,1.07], threshold=0.9,
                                    vers='concat', layout='shell', coloring='Beryl', rerun=False):
 
@@ -2230,24 +3184,26 @@ def plot_all_connectivity_networks(mapping='Beryl', algo='umap_z', nclus=7, nd=2
 
 
 def plot_connec_networks_over_time(clustering, layout='manual', nclus=13, nd=2, edge_display=0.1,
-                                   k=None, resl=None, threshold=0.9, top_n=100, metric='umap_z', 
+                                   k=None, resl=None, tau=0.01, threshold=0.9, top_n=100, metric='umap_z', 
                                    coloring='Beryl', rerun=False):
 
     '''
     network style connectivity plots for all clustering measures & parameters
     '''
 
-    fig, axs = plt.subplots(nrows=3, ncols=3,
-                            figsize=(9,10), dpi=400)
+    fig, axs = plt.subplots(nrows=4, ncols=3,
+                            figsize=(9,11), dpi=400)
     axs = axs.flatten()
     _,pal = get_allen_info()
 
     n = 0
-    for vers in ['concat', 'resting', 'quiescence', 'pre-stim-prior', 
+    for vers in ['concat', 'resting', 'quiescence', 'quie-rest-diff-shifted', 'pre-stim-prior', 'stim_all', 'mistake', 
                  'stim_surp_con', 'stim_surp_incon', 'motor_init', 'fback1', 'fback0']:
         if metric=='wass':
             d = np.load(Path(pth_dmn, f'wasserstein_matrix_{nclus}_{vers}_nd{nd}.npy'), 
                         allow_pickle=True).flat[0]
+        elif vers=='quie-rest-diff-shifted':
+            d = get_quiescence_resting_diff(metric=metric, diff='shifted')
         else:
             d = get_reg_dist(algo=metric, vers=vers, rerun=rerun)            
             
@@ -2268,7 +3224,7 @@ def plot_connec_networks_over_time(clustering, layout='manual', nclus=13, nd=2, 
             #coloring='Beryl'
         else:
             res, regs_r, regs_c, cluster_info = clustering_on_connectivity_matrix(
-                res0, regs, k=k, resl=resl, metric=metric, clustering=clustering)
+                res0, regs, k=k, resl=resl, metric=metric, tau=tau, clustering=clustering)
             
         # Add graph nodes and edges with weights (connectivity strengths)
         G = nx.Graph()
@@ -2391,3 +3347,609 @@ def plot_avg_corr_with_dmn_regions(vers, metric='umap_z', rerun=False, cols_dict
     else:
         fig.savefig(Path(one.cache_dir,'dmn', 'figs', 
                      f'{vers}_avg_corr_dmn.pdf'), dpi=150)
+
+
+
+def plot_rastermap(feat='concat_z', exa = False, vers='concat', r=None, control=False,
+                   norm_=False, mapping='Beryl', nclus=13, alpha=0.5, bg=False):
+    """
+    Function to plot a rastermap with vertical segment boundaries 
+    and labels positioned above the segments.
+
+    Extra panel with colors of mapping.
+
+    """
+
+    if r==None:
+        if control!=False:
+            norm_ = 'False_control'+control
+        r = regional_group(mapping, algo='concat_z', vers=vers, nclus=nclus, norm_=norm_)
+
+    if feat == 'concat_z_no_mistake':
+
+        # remove all mistake PETHs
+
+        to_remove = ['stimLbRcR',
+                    'stimLbLcR',
+                    'stimRbLcL',
+                    'stimRbRcL',
+                    'sLbRchoiceR',
+                    'sLbLchoiceR',
+                    'sRbLchoiceL',
+                    'sRbRchoiceL']
+    
+        # Extract relevant information from the data
+        # Initialize an empty list to store the indices to keep
+        keep_indices = []
+
+        # Get segment names and lengths
+        segment_names = list(r['len'].keys())
+        segment_lengths = list(r['len'].values())
+
+        # Track the current start index
+        current_idx = 0
+
+        # Identify indices to keep
+        for i, segment in enumerate(segment_names):
+            segment_length = segment_lengths[i]
+            if segment not in to_remove:
+                # Add indices of this segment to the keep list
+                keep_indices.extend(range(current_idx, 
+                                    current_idx + segment_length))
+            # Update the current index for the next segment
+            current_idx += segment_length
+
+        # Filter the data to keep only the desired indices
+        
+
+        data = r['concat_z'][:, keep_indices]
+        r[feat] = data
+        # Update r['len'] to reflect the new structure
+        r['len'] = {k: v for k, v in r['len'].items() if k not in to_remove}
+        print('embedding rastermap ...')
+
+        # Fit the Rastermap model
+        model = Rastermap(bin_size=1).fit(data)
+
+        r['isort'] = model.isort
+
+    if feat == 'only_cortical':
+        reg ='Isocortex'
+        assert mapping == 'Cosmos'
+        data = r['concat_z'][r['acs'] == reg, :]
+        r[feat] = data
+        print(f'embedding rastermap for {reg} cells only')
+        # Fit the Rastermap model
+        model = Rastermap(n_PCs=200, n_clusters=100,
+                      locality=0.75, time_lag_window=5, bin_size=1).fit(data)
+        r['isort'] = model.isort
+
+    if exa:
+        plot_cluster_mean_PETHs(r,mapping, feat)
+
+
+    spks = r[feat]
+    isort = r['isort']
+    data = spks[isort]
+    row_colors = np.array(r['cols'])[isort]  # Reorder colors by sorted index
+
+    n_rows, n_cols = data.shape
+    # Create a figure for the rastermap
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # plot in greys, then overlay color (good for big picture)
+    im = ax.imshow(data, vmin=0, vmax=1.5, cmap="gray_r",
+                aspect="auto")
+
+    if bg:   
+        for i, color in enumerate(row_colors):
+            ax.hlines(i, xmin=0, xmax=n_cols, colors=color, 
+            lw=.01, alpha=alpha)
+
+    ax.set_xlabel('time [bins]')    
+    ax.set_ylabel('cells')
+
+    ylim = ax.get_ylim()  
+
+    # Plot vertical boundaries and add text labels
+    h = 0
+    #for segment in PETH_types_dict[vers]:
+    for segment in r['len']:
+        xv = h + r['len'][segment]  # Cumulative position of the vertical line
+        ax.axvline(xv, linestyle='--', linewidth=1, color='grey')  # Draw vertical line
+        
+        # Add text label above the segment boundary
+        midpoint = h + r['len'][segment] / 2  # Midpoint of the segment
+        ax.text(midpoint, ylim[1] + 0.05 * (ylim[1] - ylim[0]), 
+                peth_dict[segment], rotation=90, color='k', 
+                fontsize=10, ha='center')  # Label positioned above the plot
+        
+        h += r['len'][segment]  # Update cumulative sum for the next segment
+
+
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    ax.set_facecolor('none')
+
+    plt.tight_layout()  # Adjust the layout to prevent clipping
+
+    plt.savefig(Path(pth_dmn.parent, 'figs',
+                     f'rastermap_{mapping}_{vers}_norm{norm_}.png'), 
+                dpi=200, transparent=True)
+
+
+def get_cross_val_rastermap(control, mapping='Beryl', vers='concat', nclus=13, zscore=True):
+    
+        norm_ = 'False_control'+control+'_0'
+        r = regional_group(mapping, algo='concat_z', vers=vers, nclus=nclus, norm_=norm_)
+        norm1_ = 'False_control'+control+'_1'
+        r1 = regional_group(mapping, algo='concat_z', vers=vers, nclus=nclus, norm_=norm1_)
+    
+        # Restrict to the overlapping set of cells to run sorting algorithm on 
+        r_cells = [cell in r1['uuids'] for cell in r['uuids']]
+        r['concat_z'] = r['concat_z'][r_cells]
+        r['concat'] = r['concat'][r_cells]
+        r['cols'] = np.array(r['cols'])[r_cells]
+        r['pid'] = np.array(r['pid'])[r_cells]
+        r['acs'] = np.array(r['acs'])[r_cells]
+        # Run sorting algorithm on r
+        if zscore:
+            model = Rastermap(n_PCs=200, n_clusters=100, locality=0.75, 
+                              time_lag_window=5, bin_size=1).fit(r['concat_z'])
+        else:
+            model = Rastermap(n_PCs=200, n_clusters=100, locality=0.75, 
+                              time_lag_window=5, bin_size=1).fit(r['concat'])
+            
+        r['isort'] = model.isort
+
+        # Cross validation: order r1 from the sorting result on r
+        r1_cells = [cell in r['uuids'] for cell in r1['uuids']]
+        r1['concat_z'] = r1['concat_z'][r1_cells]
+        r1['concat'] = r1['concat'][r1_cells]
+        r1['pid'] = np.array(r1['pid'])[r1_cells]
+        r1['cols'] = np.array(r1['cols'])[r1_cells]
+        r1['acs'] = np.array(r1['acs'])[r1_cells]
+        # r1['cols'] = r['cols']
+        r1['isort'] = model.isort
+
+        # Unify the cell ids in both sets
+        r['uuids'] = r['uuids'][r_cells]
+        r1['uuids'] = r1['uuids'][r1_cells]
+
+        return r, r1, norm_, norm1_
+
+
+def plot_regional_network_participation(reg, control_list, vers='concat', 
+                                        cmap_name='Blues', clustering='louvain',
+                                        plot_raster=True, save=True, annotate=False):
+    '''
+    Get regional network participation for a network, and plot swanson & rastermap
+    reg: the focus region for network participation (=1 always for this region)
+    control_list: list of control versions to include for participation ratio calculation
+    '''
+
+    regs_ordered, clusters = get_cluster_membership_across_controls(control_list, vers)    
+    regs=regs_ordered[False]
+    
+    # Get network participation ratio
+    participation=np.zeros(len(regs))
+    for control in control_list:
+        clus_id=int(clusters[control][regs_ordered[control]==reg])
+        regs_in_clus=regs_ordered[control][clusters[control]==clus_id]
+        participation=participation + [reg in regs_in_clus for reg in regs]
+
+    participation=participation/np.max(participation)
+
+    # Plot swanson
+    cmap = cm.get_cmap(cmap_name)#.reversed()
+    fig,ax = plt.subplots(figsize=(8,3.34))
+    acronyms = regs
+    values = participation
+    plot_swanson_vector(acronyms, values, annotate=annotate, ax=ax,
+                        annotate_list=regs, empty_color='silver',
+                        cmap=cmap, fontsize=5)
+    
+    ax.set_axis_off()
+    ax.set_facecolor('none')
+    if save:
+        fig.savefig(Path(pth_dmn.parent, 'figs',
+                    f'{vers}_{clustering}_{reg}network_participation.pdf'),
+                    transparent=True, format="pdf", dpi=150, bbox_inches="tight")
+
+    if plot_raster:
+        # Get data for rastermap
+        feat='concat_z'
+        r = regional_group(mapping='Beryl', algo=feat, vers='concat0')
+        spks = r[feat]
+        isort = r['isort']
+        data = spks[isort]
+    
+        # Set color based on network participation colormap
+        acs = r['acs']
+        r['cols'] = [cmap(participation)[regs==reg] for reg in acs]
+        r['cols'] = [entry if entry.size > 0 else np.array([cmap(0)]) for entry in r['cols']]
+        row_colors = np.array(r['cols'])[isort]
+
+        # Plot rastermap
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.imshow(data, vmin=0, vmax=1.5, cmap="gray_r", aspect="auto")
+        n_rows, n_cols = data.shape
+        ylim = ax.get_ylim()  
+        h=0
+        for segment in r['len']:
+            xv = h + r['len'][segment]  # Cumulative position of the vertical line
+            ax.axvline(xv, linestyle='--', linewidth=1, color='grey')  # Draw vertical line
+        
+            # Add text label above the segment boundary
+            midpoint = h + r['len'][segment] / 2  # Midpoint of the segment
+            ax.text(midpoint, ylim[1] + 0.05 * (ylim[1] - ylim[0]), 
+                    peth_dict[segment], rotation=90, color='k', 
+                    fontsize=10, ha='center')  # Label positioned above the plot
+        
+            h += r['len'][segment]  # Update cumulative sum for the next segment
+
+
+        for i, color in enumerate(row_colors):
+            ax.hlines(i, xmin=0, xmax=n_cols, colors=color, 
+            lw=.01, alpha=0.5)
+
+        # Remove top and right spines
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        plt.tight_layout()  # Adjust the layout to prevent clipping
+
+        plt.savefig(Path(pth_dmn.parent, 'figs',
+                     f'rastermap_{reg}network.png'), dpi=200)
+
+
+def plot_swansons_clusters(control, algo='umap_z', vers='concat', k=4, tau=0.01, clustering='louvain'):
+    d = get_reg_dist(algo=algo, vers=vers, control=control)
+    res = d['res']
+    regs = d['regs']
+    _, _, regs, cluster_info = clustering_on_connectivity_matrix(res, regs, 
+                                                                 clustering=clustering, 
+                                                                 k=k, tau=tau)
+    if clustering=='ICA_cutoff':
+        clusters = np.arange(0, k, 1)
+    else: 
+        clusters = np.sort(cluster_info)
+        
+    for n in set(clusters):
+        fig,ax = plt.subplots(figsize=(8,3.34), dpi=150)
+        if clustering=='ICA_cutoff':
+            acronyms = regs[cluster_info[:,n]==1]
+        else:
+            acronyms = regs[clusters==n]
+        if len(acronyms)<4:
+            continue
+        values = np.ones(len(acronyms))
+        plot_swanson_vector(acronyms, values, annotate=True, ax=ax,
+                            annotate_list=regs, empty_color='silver',
+                            cmap='coolwarm', fontsize=5)
+        ax.set_axis_off()
+        fig.savefig(Path(pth_dmn.parent, 'figs',
+                     f'{vers}_{algo}_{clustering}_ctr{control}_{n}.png'), dpi=200)
+
+
+def plot_regional_hist(cell_regs, start, end, name, normalized=True):
+    '''
+    Plot histogram of selected group of cells' beryl regions
+    start & end: two arrays of start/end times for lists of cells to be included
+    '''
+    regs=[]
+    for i in range(len(start)):
+        regs.append(cell_regs[start[i]:end[i]])
+    regs=np.concatenate(regs)
+    
+    filtered_data = [item for item in regs if item not in ['void', 'root']]
+    counts = Counter(filtered_data)
+    #normalize by full regional counts
+    if normalized:
+        full_counts = Counter(cell_regs)
+        normalized_counts = {
+            key: counts[key] / full_counts[key]
+            for key in counts if full_counts[key] >= 50  # Only keep if more than 50 cells in full counts
+        }
+    else:
+        normalized_counts=counts
+
+    #sort categories by frequency in descending order
+    sorted_items = sorted(normalized_counts.items(), key=lambda x: x[1], reverse=True)
+    categories, frequencies = zip(*sorted_items)  #unpack sorted items
+    _, pal = get_allen_info()
+    colors=[pal[reg] for reg in categories]
+
+    fig, ax = plt.subplots(figsize=(14, 5), dpi=150)
+    ax.bar(categories, frequencies, color=colors)
+    ax.set_xticklabels(categories, rotation=90, fontsize=4)
+    #ax.set_title(name, fontsize=20)
+
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    ax.set_facecolor('none')
+    #ax.set_ylim(0, 0.25)
+    ax.set_xlim(left=-4)
+
+    fig.savefig(Path(pth_dmn.parent, 'figs', f'{name}_regional_hist.pdf'), 
+                dpi=200, transparent=True)
+
+    return frequencies
+
+
+
+def plot_subset_raster(data, start, end, name):
+    '''
+    Plot raster and avg peth for interested subset(s) of cells
+    start & end: two arrays of start/end times for lists of cells to be included
+    '''
+    
+    plot_data=[]
+    for i in range(len(start)):
+        plot_data.append(data[start[i]:end[i]])
+    plot_data=np.concatenate(plot_data)
+
+    fig, axs = plt.subplots(2,1, figsize=(20, 8), sharex=True)
+    axs[0].imshow(plot_data, 
+                  vmin=0, vmax=1.5, 
+                  cmap="gray_r",
+                  aspect="auto") # Plot raster
+
+    y = np.mean(plot_data, axis=0) # Plot avg peth
+    axs[1].plot(y, linewidth=0.75)
+    #colors=['black', 'blue', 'cyan', 'green', 'yellow']
+    #for i in range(len(plot_data)//5):
+    #    ploty = np.mean(plot_data[i*5:i*5+5], axis=0)
+    #    axs[1].plot(ploty[648:(648+96)], linewidth=0.5, color=colors[i])
+        #axs[1].plot(plot_data[i*5][648:(648+96)], linewidth=0.5, color=colors[i])
+        #axs[1].plot(plot_data[i*5+1][648:(648+96)], linewidth=0.5, color=colors[i])
+        #axs[1].plot(plot_data[i*5+2][648:(648+96)], linewidth=0.5, color=colors[i])
+        #axs[1].plot(plot_data[i*5+2+1][648:(648+96)], linewidth=0.5, color=colors[i])
+        #axs[1].plot(plot_data[i*5+4][648:(648+96)], linewidth=0.5, color=colors[i])
+    
+    ylim = axs[0].get_ylim()
+    h=0
+    for segment in data_lengths:
+        xv = h + data_lengths[segment]  # Cumulative position of the vertical line
+        axs[0].axvline(xv, linestyle='--', linewidth=0.2, color='grey')  # Draw vertical line
+        axs[1].axvline(xv, linestyle='--', linewidth=0.2, color='grey')
+        
+        # Add text label above the segment boundary
+        midpoint = h + data_lengths[segment] / 2  # Midpoint of the segment
+        axs[0].text(midpoint, ylim[1] + 0.05 * (ylim[1] - ylim[0]),  
+                peth_dict[segment], rotation=90, color='k', 
+                fontsize=10, ha='center')  # Label positioned above the plot
+        
+        h += data_lengths[segment]  # Update cumulative sum for the next segment
+
+    # Remove top and right spines
+    axs[0].spines['top'].set_visible(False)
+    axs[0].spines['right'].set_visible(False)
+    axs[1].spines['top'].set_visible(False)
+    axs[1].spines['right'].set_visible(False)
+
+    axs[0].set_facecolor('none')
+    axs[1].set_facecolor('none')
+
+    for spine in axs[0].spines.values():
+        spine.set_linewidth(0.2)
+
+    axs[0].yaxis.set_ticks([0, len(plot_data)])
+    axs[0].xaxis.set_ticks([])
+    axs[0].set_yticklabels(axs[0].get_yticks(), fontsize=25)
+    axs[1].yaxis.set_ticks([])
+    axs[1].xaxis.set_ticks([])
+    axs[1].set_xticklabels([])
+
+    fig.savefig(Path(pth_dmn.parent, 'figs', f'{name}_subset_raster.pdf'), 
+                dpi=200, transparent=True)
+
+
+def plot_regional_hist_comparison(cell_regs, indices0, indices1, comparison, top_cells=2000):
+    '''
+    Plot histogram of most differential cells for two conditions in comparison=[condition0, condition1]
+    indices0, indices1: sorted most differential cells of the two conditions
+    to-do: plot this on original data? or on other sets of controls?
+    '''
+    indices = set(indices0[:top_cells]) | set(indices1[:top_cells])
+    regs = cell_regs[list(indices)]
+    filtered_data = [item for item in regs if item not in ['void', 'root']]
+    counts = Counter(filtered_data)
+    #normalize by full regional counts
+    full_counts = Counter(cell_regs)
+    normalized_counts = {
+        key: counts[key] / full_counts[key]
+        for key in counts if full_counts[key] >= 50  # Only keep if more than 50 cells in full counts
+    }
+
+    #sort categories by frequency in descending order
+    sorted_items = sorted(normalized_counts.items(), key=lambda x: x[1], reverse=True)
+    categories, frequencies = zip(*sorted_items)  #unpack sorted items
+    _, pal = get_allen_info()
+    colors=[pal[reg] for reg in categories]
+
+    fig, ax = plt.subplots(figsize=(14, 5), dpi=150)
+    ax.bar(categories, frequencies, color=colors)
+    ax.set_xticklabels(categories, rotation=90, fontsize=4)
+    #ax.set_title(f'{comparison[0]}_{comparison[1]} most differential cells', fontsize=20)
+    
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    ax.set_facecolor('none')
+    fig.savefig(Path(pth_dmn.parent, 'figs', 
+                     f'{comparison[0]}_{comparison[1]}_differential_cells_from_raster_{control}.pdf'), 
+                dpi=200, transparent=True)
+
+
+def plot_two_subsets_raster(data, indices0, indices1, comparison, top_cells=2000):
+    '''
+    Plot rastermap sorted by most differential cells in the two conditions
+    also plot the two avg peths
+    '''
+    
+    fig, axs = plt.subplots(2,1, figsize=(20, 8), sharex=True)
+    axs[0].imshow(plot_data[indices0], vmin=0, vmax=1.5, cmap="gray_r",
+                  aspect="auto")
+
+    y = np.mean(plot_data[indices0[:top_cells]], axis=0)
+    y1 = np.mean(plot_data[indices1[:top_cells]], axis=0)
+    axs[1].plot(y, linewidth=0.75, label=peth_dict[comparison[0]])
+    axs[1].plot(y1, linewidth=0.75, label=peth_dict[comparison[1]])
+    axs[1].legend(frameon=False)
+
+    h=0
+    ylim = axs[0].get_ylim()
+    for segment in data_lengths:
+        xv = h + data_lengths[segment]  # Cumulative position of the vertical line
+        axs[0].axvline(xv, linestyle='--', linewidth=0.5, color='grey')  # Draw vertical line
+        axs[1].axvline(xv, linestyle='--', linewidth=0.5, color='grey')
+        
+        # Add text label above the segment boundary
+        midpoint = h + data_lengths[segment] / 2  # Midpoint of the segment
+        axs[0].text(midpoint, ylim[1] + 0.05 * (ylim[1] - ylim[0]), 
+                peth_dict[segment], rotation=90, color='k', 
+                fontsize=10, ha='center')  # Label positioned above the plot
+        
+        h += data_lengths[segment]  # Update cumulative sum for the next segment
+
+    # Remove top and right spines
+    axs[0].spines['top'].set_visible(False)
+    axs[0].spines['right'].set_visible(False)
+    axs[1].spines['top'].set_visible(False)
+    axs[1].spines['right'].set_visible(False)
+
+    axs[0].set_facecolor('none')
+    axs[1].set_facecolor('none')
+    
+    for spine in axs[0].spines.values():
+        spine.set_linewidth(0.2)
+
+    axs[0].yaxis.set_ticks([0, len(plot_data)])
+    axs[0].xaxis.set_ticks([])
+    axs[0].set_yticklabels(axs[0].get_yticks(), fontsize=25)
+    axs[1].yaxis.set_ticks([])
+    axs[1].xaxis.set_ticks([])
+    axs[1].set_xticklabels([])
+    
+    fig.savefig(Path(pth_dmn.parent, 'figs', 
+                     f'{comparison[0]}_{comparison[1]}_differential_raster_{control}.pdf'), 
+                dpi=200, transparent=True)
+
+
+def sum_for_key(data, key, after=False):
+    if key not in data.keys():
+        return 'key not in data'
+        
+    total = 0
+    for k, v in data.items():
+        if k == key:
+            if after:
+                total += v
+            break  # Stop when we reach the given key
+        total += v
+    return total
+
+
+def sort_by_diff_two_conditions(r, comparison, start_times=None, end_times=None, 
+                                feat='concat_z', mean_baseline=False):
+    '''
+    sort data by how much the cells respond differently to two conditions
+    e.g. [blockL, blockR] in comparison
+    return two sets of indices: 
+        if mean_baseline:
+            indices0 sort from largest blockL-avg(blockL,blockR) to smallest; indices1 for blockR
+        else:
+            indices0 sort from largest blockL to smaller; indices1 for blockR
+    '''
+    data = r[feat]
+    if start_times==None:
+        start_times={key: sum_for_key(data_lengths, key) for key in comparison}
+    if end_times==None:
+        end_times={key: sum_for_key(data_lengths, key, after=True) for key in comparison}
+    
+    cond0 = np.mean(data[:,start_times[comparison[0]]:end_times[comparison[0]]], axis=1)
+    cond1 = np.mean(data[:,start_times[comparison[1]]:end_times[comparison[1]]], axis=1)
+    if mean_baseline:
+        mean_res=(cond0+cond1)/2
+        cond0=cond0-mean_res
+        cond1=cond1-mean_res
+    indices0=sorted(range(len(cond0)), key=lambda i: cond0[i], reverse=True)
+    indices1=sorted(range(len(cond1)), key=lambda i: cond1[i], reverse=True)
+    
+    return indices0, indices1
+
+
+def float_array_to_rgba(img_float):
+    cmap = cm._colormaps['gray_r']
+    rgba = cmap(img_float)  # Returns float32 RGBA
+    return (rgba * 255).astype(np.uint8)  # Convert to uint8
+    
+def save_rastermap_pdf(start=[0], end=None, name=None, 
+                       feat='concat_z', mapping='kmeans', bg=False, cv=False):
+
+    if cv:
+        # load Ari's files
+        r_test = np.load(Path(pth_dmn, 'cross_val_test.npy'),
+                         allow_pickle=True).flat[0]
+        r_train = np.load(Path(pth_dmn, 'cross_val_train.npy'), 
+                          allow_pickle=True).flat[0]
+        
+        spks = r_test[feat]
+        isort = r_train['isort'] 
+        data = spks[isort]
+
+        bg = False
+
+        plot_data=[]
+        if end==None:
+            end = [len(data)]
+        for i in range(len(start)):
+            plot_data.append(data[start[i]:end[i]])
+        data=np.concatenate(plot_data)
+
+
+    else:
+        r = regional_group(mapping)
+        spks = r[feat]
+        isort = r['isort'] 
+        data = spks[isort]
+    
+    # Normalize and convert to RGBA image
+    norm_data = data - data.min()
+    norm_data = norm_data / norm_data.max()
+    image_rgba = float_array_to_rgba(norm_data)
+    image_rgba[..., 3] = 255
+
+    if bg:
+        # RGBA rows
+        row_colors = np.array(r['cols'])[isort]  
+
+        # Blend row colors onto grayscale image
+        alpha_overlay = 0.2  # adjust intensity of color overlay
+
+        for i in range(image_rgba.shape[0]):
+            r_c, g_c, b_c, _ = row_colors[i] * 255  # get color per row
+            overlay = np.array([r_c, g_c, b_c], dtype=np.uint8)
+
+            # Blend overlay with original grayscale values (RGB only)
+            image_rgba[i, :, :3] = (
+                (1 - alpha_overlay) * image_rgba[i, :, :3] +
+                alpha_overlay * overlay[None, :]
+            ).astype(np.uint8)
+
+    # Convert to RGB (drop alpha) for PDF compatibility
+    img = Image.fromarray(image_rgba[..., :3], mode='RGB')
+    if name==None:
+        name = f'_{mapping}' if bg else ''
+        if cv:
+            name = 'cross_val'
+    img.save(Path(pth_dmn.parent, 'figs', f"rastermap{name}.pdf"), "PDF")
+
+
+
