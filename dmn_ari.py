@@ -76,6 +76,8 @@ import dataframe_image as dfi
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.stats import chi2
 # from scipy.stats import norm
+from scipy.cluster.hierarchy import fcluster
+from collections import defaultdict
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -137,6 +139,9 @@ PETH_types_dict = {
     'movement': ['choiceL', 'choiceR'],
     'fback1': ['fback1'],
     'fback0': ['fback0']}      
+
+PETH_types_dict['concat0'] = PETH_types_dict['concat']
+PETH_types_dict['concat_unify_tls'] = PETH_types_dict['concat']
 
 data_lengths={'inter_trial': 72,
               'blockL': 144,
@@ -281,6 +286,17 @@ networks = {
     'fback0_2': 'PRNr'
 }
 
+raster_types = {
+    'stim_response': {'start': [6000], 'end': [6734]},
+    'error': {'start': [7200, 10000, 20750, 34600], 
+                       'end': [8400, 11000, 21250, 36000]},
+    'integrator': {'start':[3700], 'end':[6000]},
+    'stim_n_int': {'start':[3700], 'end': [6734]},
+    'sequence': {'start': [13450, 21250], 'end': [20750, 34600]}, 
+    'move_init': {'start': [840], 'end':[3700]},
+    'movement': {'start':[43740], 'end':[44890]}
+    
+}
 
 def put_panel_label(ax, k):
     ax.annotate(string.ascii_lowercase[k], (-0.05, 1.15),
@@ -378,6 +394,42 @@ def cosine_sim(v0, v1):
     return np.inner(v0,v1)/ (norm(v0) * norm(v1))
 
 
+def get_uuids_raster_types(cell_types=['stim_res', 'integrator', 'move_init', 'movement']):
+    # get uuids for cell types of interest (defined from rastermap)
+    
+    r1 = np.load(Path(pth_dmn,'cross_val_test.npy'), allow_pickle=True).flat[0]
+    raster_types = {
+        'stim_res': {'start': [6000], 'end': [6734]},
+        'integrator': {'start':[3700], 'end':[6000]},
+        'stim_n_int': {'start':[3700], 'end':[6734]},
+        'move_init': {'start': [840], 'end':[3700]},
+        'movement': {'start':[43740], 'end':[44890]}, 
+        'sequence': {'start': [13450, 21250], 'end': [20750, 34600]}
+    }
+    
+    uuids_included, pids_included, cell_raster_type = [], [], {}
+    
+    for raster_type in cell_types:
+        start = raster_types[raster_type]['start']
+        end = raster_types[raster_type]['end']
+        isort = r1['isort']
+        cell_raster_type[raster_type]=[]
+        for i in range(len(start)):
+            raster_type_ids = r1['uuids'][isort][start[i]:end[i]]
+            pids = r1['pid'][isort][start[i]:end[i]]
+            uuids_included.append(raster_type_ids)
+            pids_included.append(pids)
+            # cell_raster_type.append(np.repeat(raster_type, len(raster_type_ids)))
+            cell_raster_type[raster_type].append(raster_type_ids)
+        cell_raster_type[raster_type]=np.concatenate(cell_raster_type[raster_type])
+        
+    uuids_included=np.concatenate(uuids_included)
+    pids_included=np.concatenate(pids_included)
+    pids_included=list(set(pids_included))
+    
+    return uuids_included, pids_included, cell_raster_type
+
+
 
 def get_reg_dist(rerun=False, algo='umap_z', control=False,
                   mapping='Beryl', vers='concat', shuffling=False):
@@ -399,7 +451,7 @@ def get_reg_dist(rerun=False, algo='umap_z', control=False,
         
     if (not pth_.is_file() or rerun):
         res, regs = smooth_dist(algo=algo, mapping=mapping, vers=vers, 
-                                shuffling=shuffling, control=control)    
+                                shuffling=shuffling, control=control, dendro=False)    
         d = {'res': res, 'regs' : regs}
         np.save(pth_, d, allow_pickle=True)
     else:
@@ -621,221 +673,131 @@ def regional_group(mapping, algo, vers='concat', norm_=False, min_s=10, eps=0.5,
 
 
 def smooth_dist(algo='umap_z', mapping='Beryl', show_imgs=False, shuffling=False,
-                norm_=True, dendro=True, nmin=30, vers='concat', control=False):
+                norm_=True, dendro=False, nmin=30, vers='concat', control_list=[False]):
 
     '''
-    smooth 2d pointclouds, show per class
+    Smooth 2D pointclouds, show per class.
     norm_: normalize smoothed image by max brightness
+    control_list: list of control versions (e.g. [False, 'ver0_0', ...])
     '''
 
-    if control!=False:
-        r = regional_group(mapping, algo, vers=vers, norm_='False_control'+control)
-    else: 
-        r = regional_group(mapping, algo, vers=vers)
     feat = 'concat_z' if algo[-1] == 'z' else 'concat'
     fontsize = 12
 
-    if shuffling:
-        # randomly shuffle the region labels as a control for clustering
-        random.shuffle(r['acs'])
-        
-    # Define grid size and density kernel size
+    if not shuffling:
+        if len(control_list) != 1:
+            raise ValueError("When shuffling=False, control_list must contain exactly one version.")
+        control = control_list[0]
+        if control is not False:
+            r = regional_group(mapping, algo, vers=vers, norm_='False_control' + control)
+        else:
+            r = regional_group(mapping, algo, vers=vers)
+
+        return _process_single_r(r, algo, mapping, norm_, dendro, nmin, feat, show_imgs)
+
+    # shuffling == True: align & shuffle across all control versions
+    r_dict = {}
+    uuid_sets = {}
+    uuid_to_index = {}
+
+    # Load all control versions
+    for control in control_list:
+        if control is not False:
+            r = regional_group(mapping, algo, vers=vers, norm_='False_control' + control)
+        else:
+            r = regional_group(mapping, algo, vers=vers)
+        r_dict[control] = r
+        uuid_sets[control] = set(r['uuids'])
+        uuid_to_index[control] = {uuid: i for i, uuid in enumerate(r['uuids'])}
+
+    # Find shared uuids across all versions
+    shared_uuids = sorted(set.intersection(*uuid_sets.values()))
+
+    # Build shuffled acs assignment from base control
+    base_control = control_list[0]
+    base_r = r_dict[base_control]
+    base_idx = uuid_to_index[base_control]
+    original_acs = [base_r['acs'][base_idx[uuid]] for uuid in shared_uuids]
+    shuffled_acs = original_acs[:]
+    random.shuffle(shuffled_acs)
+    uuid_to_shuffled_acs = dict(zip(shared_uuids, shuffled_acs))
+
+    # Process each aligned version
+    results = {}
+    for control in control_list:
+        r = r_dict[control]
+        idx_map = uuid_to_index[control]
+        shared_indices = [idx_map[uuid] for uuid in shared_uuids]
+
+        # Restrict all per-cell fields
+        n_cells = len(r['uuids'])
+        for key in r:
+            val = r[key]
+            if isinstance(val, list) and len(val) == n_cells:
+                r[key] = [val[i] for i in shared_indices]
+            elif isinstance(val, np.ndarray) and val.shape[0] == n_cells:
+                r[key] = val[shared_indices]
+
+        r['acs'] = [uuid_to_shuffled_acs[uuid] for uuid in shared_uuids]
+        # r['uuids'] = shared_uuids
+
+        # Process and collect results, skip plotting
+        res, regs = _process_single_r(r, algo, mapping, norm_, dendro, nmin, feat, show_imgs=False)
+        results[control] = (res, regs)
+
+    return results
+
+def _process_single_r(r, algo, mapping, norm_, dendro, nmin, feat, show_imgs):
     x_min = np.floor(np.min(r[algo][:,0]))
     x_max = np.ceil(np.max(r[algo][:,0]))
     y_min = np.floor(np.min(r[algo][:,1]))
     y_max = np.ceil(np.max(r[algo][:,1]))
-    
+
     imgs = {}
     xys = {}
-    
+
     regs00 = Counter(r['acs'])
-    regcol = {reg: np.array(r['cols'])[r['acs'] == reg][0] 
-              for reg in regs00}    
+    regcol = {reg: np.array(r['cols'])[np.array(r['acs']) == reg][0] for reg in regs00}    
 
     if mapping == 'Beryl':
-        # order regions 
         p = (Path(iblatlas.__file__).parent / 'beryl.npy')
-        regsord = dict(zip(br.id2acronym(np.load(p), 
-                           mapping='Beryl'),
-                           br.id2acronym(np.load(p), 
-                           mapping='Cosmos')))
-        regs = []
-        
-        for reg in regsord:
-            if ((reg in regs00) and (regs00[reg] > nmin)):
-                regs.append(reg)
-    
+        regsord = dict(zip(br.id2acronym(np.load(p), mapping='Beryl'),
+                           br.id2acronym(np.load(p), mapping='Cosmos')))
+        regs = [reg for reg in regsord if reg in regs00 and regs00[reg] > nmin]
     else:
-        regs = [reg for reg in regs00 if 
-                regs00[reg] > nmin]
+        regs = [reg for reg in regs00 if regs00[reg] > nmin]
 
     for reg in regs:
-    
-        # scale values to lie within unit interval
         x = (r[algo][np.array(r['acs'])==reg,0] - x_min)/ (x_max - x_min)    
         y = (r[algo][np.array(r['acs'])==reg,1] - y_min)/ (y_max - y_min)
 
         data = np.array([x,y]).T         
-        inds = (data * 255).astype('uint')  # convert to indices
+        inds = (data * 255).astype('uint')
 
-        img = np.zeros((256,256))  # blank image
-        for i in np.arange(data.shape[0]):  # draw pixels
+        img = np.zeros((256,256))
+        for i in np.arange(data.shape[0]):
             img[inds[i,0], inds[i,1]] += 1
-        
+
         imsm = ndi.gaussian_filter(img.T, (10,10))
         imgs[reg] = imsm/np.max(imsm) if norm_ else imsm
         xys[reg] = [x,y]
-  
 
-    if show_imgs:
-
-        # tweak for other mapping than "layers"
-        fig, axs = plt.subplots(nrows=3, ncols=len(regs),
-                                figsize=(18.6, 5.8))        
-        axs = axs.flatten()    
-        #[ax.set_axis_off() for ax in axs]
-
-        vmin = np.min([np.min(imgs[reg].flatten()) for reg in imgs])
-        vmax = np.max([np.max(imgs[reg].flatten()) for reg in imgs])
-        
-        k = 0 
-
-        # row of images showing point clouds     
-        for reg in imgs:
-            axs[k].scatter(xys[reg][0], xys[reg][1], color=regcol[reg], s=0.1)
-            axs[k].set_title(f'{reg}, ({regs00[reg]})')
-            #axs[k].set_axis_off()
-            axs[k].set_aspect('equal')
-            axs[k].spines['right'].set_visible(False)
-            axs[k].spines['top'].set_visible(False)
-            axs[k].set_xlabel('umap dim 1')
-            axs[k].set_ylabel('umap dim 2')             
-            k+=1
-            
-        # row of panels showing smoothed point clouds
-        for reg in imgs:
-            axs[k].imshow(imgs[reg], origin='lower', vmin=vmin, vmax=vmax,
-                          interpolation=None)
-            axs[k].set_title(f'{reg}, ({regs00[reg]})')
-            axs[k].set_axis_off()
-            k+=1                            
-            
-        # row of images showing mean feature vector
-        for reg in imgs:
-            pts = np.arange(len(r['acs']))[r['acs'] == reg]
-            
-            xss = T_BIN * np.arange(len(np.mean(r[feat][pts],axis=0)))
-            yss = np.mean(r[feat][pts],axis=0)
-            yss_err = np.std(r[feat][pts],axis=0)/np.sqrt(len(pts))
-                         
-            axs[k].fill_between(xss, yss - yss_err, yss + yss_err, 
-                                alpha=0.2, color = regcol[reg])    
-                
-            maxys = [yss + yss_err]  
-              
-            #region mean
-            axs[k].plot(xss,yss, color='k', linewidth=2)    
-
-            axs[k].set_title(reg)
-            axs[k].set_xlabel('time [sec]')
-            axs[k].set_ylabel(feat)
-            axs[k].set_axis_off()      
-        
-            # plot vertical boundaries for windows
-            h = 0
-            for i in r['len']:
-            
-                xv = r['len'][i] + h
-                axs[k].axvline(T_BIN * xv, linestyle='--',
-                            color='grey', linewidth=0.1)
-                            
-                axs[k].text(T_BIN * xv, 0.8 * np.max(maxys), 
-                         i, rotation=90, 
-                         fontsize=5, color='k')
-            
-                h += r['len'][i]
-            
-            k+=1
-            
-        
-        fig.suptitle(f'algo: {algo}, mapping: {mapping}, norm:{norm_}')
-        fig.tight_layout()    
-
-    # show cosine similarity of density vectors
-    
-
-    
     res = np.zeros((len(regs),len(regs)))
-    i = 0
-    for reg_i in imgs:
-        j = 0
-        for reg_j in imgs:
+    for i, reg_i in enumerate(imgs):
+        for j, reg_j in enumerate(imgs):
             v0 = imgs[reg_i].flatten()
             v1 = imgs[reg_j].flatten()
-            
             res[i,j] = cosine_sim(v0, v1)
-            j+=1
-        i+=1            
 
     if dendro:
-        fig0, axs = plt.subplots(ncols=2, figsize=(10,8), 
-            gridspec_kw={'width_ratios': [1, 11]})
         res = np.round(res, decimals=8)
-        
         cres = squareform(1 - res)
         linkage_matrix = hierarchy.linkage(cres)
-        
-
-        # Order the matrix using the hierarchical clustering
         ordered_indices = hierarchy.leaves_list(linkage_matrix)
         res = res[:, ordered_indices][ordered_indices, :]
-        
-        row_dendrogram = hierarchy.dendrogram(linkage_matrix,labels =regs,
-                     orientation="left", color_threshold=np.inf, ax=axs[0])
         regs = np.array(regs)[ordered_indices]
-        
-        [t.set_color(i) for (i,t) in    
-            zip([regcol[reg] for reg in regs],
-                 axs[0].yaxis.get_ticklabels())]
-                                     
-                     
-        ax0 = axs[1]
-        
-        axs[0].axis('off')
-#        axs[0].tick_params(axis='both', labelsize=fontsize)
-#        axs[0].spines['top'].set_visible(False)
-#        axs[0].spines['bottom'].set_visible(False)    
-#        axs[0].spines['right'].set_visible(False)
-#        axs[0].spines['left'].set_visible(False)
-#        axs[0].set_xticks([])
-        
-        
-    else:
-        fig0, ax0 = plt.subplots(figsize=(4,4))
-    
-                   
-    ims = ax0.imshow(res, origin='lower', interpolation=None)
-    ax0.set_xticks(np.arange(len(regs)), regs,
-                   rotation=90, fontsize=fontsize)
-    ax0.set_yticks(np.arange(len(regs)), regs, fontsize=fontsize)               
-                   
-    [t.set_color(i) for (i,t) in
-        zip([regcol[reg] for reg in regs],
-        ax0.xaxis.get_ticklabels())] 
-         
-    [t.set_color(i) for (i,t) in    
-        zip([regcol[reg] for reg in regs],
-        ax0.yaxis.get_ticklabels())]
-    
-    #ax0.set_title(f'cosine similarity of smooth images, norm:{norm_}')
-    #ax0.set_ylabel(mapping)
-    cb = plt.colorbar(ims,fraction=0.046, pad=0.04)
-    cb.set_label('regional similarity')
-    fig0.tight_layout()
-    #fig0.suptitle(f'{algo}, {mapping}')
-    
-    return res, regs
 
+    return res, regs
 
 
 def compare_distance_metrics_scatter(vers, nclus=7, nd=2, rerun=False):
@@ -2109,7 +2071,7 @@ def plot_connectivity_matrix(metric='umap_z', mapping='Beryl', nclus=7, nd=2, k=
     start_idx = 0
     for size in cluster_sizes:
         # Draw a square around the cluster
-        rect = patches.Rectangle((start_idx, start_idx), size, size, 
+        rect = Rectangle((start_idx, start_idx), size, size, 
                                  linewidth=2, edgecolor='black', facecolor='none')
         ax0.add_patch(rect)
         start_idx += size
@@ -2353,7 +2315,8 @@ def plot_avg_peth_from_vers(vers, metric='umap_z', clustering='louvain',
 
 
 def plot_avg_peth_networks(vers, networks, metric='umap_z', clustering='louvain', 
-                           resl=1.01, rerun=False, rename=False, same_plot=False):
+                           resl=1.01, rerun=False, rename=True, same_plot=False,
+                           n_permutations = 1000, multi_test='stouffer'):
     '''
     plot avg peth from networks defined from networks dict (reliable networks from split trial controls)
     also plot randomly shuffled peths as controls
@@ -2362,19 +2325,32 @@ def plot_avg_peth_networks(vers, networks, metric='umap_z', clustering='louvain'
     participation_networks = get_regional_participation_all_networks(networks=networks,
                                                                      clustering=clustering,
                                                                      rename=rename)
-    d = get_reg_dist(algo='umap_z', vers='concat')
+    d = get_reg_dist(algo='umap_z', vers='concat', rerun=rerun)
     regs = d['regs']
     
     r = regional_group(mapping='Beryl', algo=metric, vers=vers) # get peth data
     feat = 'concat_z'
                         
-    clusters = [network for network in networks if network.startswith(vers)]
+    phase=phases_dict[vers]
+    clusters = [network for network in list(participation_networks.keys()) if network.startswith(phase)]
     if same_plot:
         fg, axx = plt.subplots(figsize=(10,2), dpi=200)
     else:
         fg, axx = plt.subplots(nrows=len(clusters),
                                sharex=True, sharey=True,
-                               figsize=(6,6), dpi=200)
+                               figsize=(10,6), dpi=100)
+
+    # colors_rgb = [
+    #     [65 / 255, 105 / 255, 225 / 255],   # Royal Blue
+    #     [220 / 255, 20 / 255, 60 / 255],    # Crimson
+    #     [46 / 255, 139 / 255, 87 / 255],    # Sea Green
+    #     [255 / 255, 140 / 255, 0 / 255]     # Dark Orange
+    # ]
+    rgba_map = {
+        'pink': [255/255, 182/255, 193/255],
+        'green': [60/255, 179/255, 113/255]
+    }
+    # colors_rgb = {k: rgba_map.get(network_colors.get(k)) for k in networks}
 
     kk=0
     for clu in clusters:
@@ -2390,30 +2366,68 @@ def plot_avg_peth_networks(vers, networks, metric='umap_z', clustering='louvain'
         #print('cluster:', clu, 'mean', np.mean(yy))
 
         # create randomly shuffled controls
-        n_permutations = 100
         controls = []
         for _ in range(n_permutations):
             shuffled_weights = np.random.permutation(mapped_weights)
             control_yy = np.average(filtered_feat, axis=0, weights=shuffled_weights)
             controls.append(control_yy)
         controls = np.array(controls)
-        #p_value = np.mean(controls >= yy)
-        #print(clu, 'p_val', p_value)
+        p_values = np.mean(np.abs(controls - np.mean(controls, axis=0)) >= np.abs(yy - np.mean(controls, axis=0)), 
+                           axis=0)
+        alpha_values = np.where(p_values < 0.01, 1.0, 0.2)
+        # Create an RGBA color array (blue color with variable alpha)
+        colors = np.zeros((len(xx), 4))  # 4 for RGBA
+        colors[:, 3] = alpha_values  # Alpha channel
+        colors[:, 0] = rgba_map[network_colors[clu]][0]
+        colors[:, 1] = rgba_map[network_colors[clu]][1]
+        colors[:, 2] = rgba_map[network_colors[clu]][2]           
+
+        # print(p_values, np.mean(p_values))
+        
+        # get a combined p value
+        # if multi_test == 'fisher':
+            # chi2_stat = -2 * np.sum(np.log(p_values))
+            # combined_p_value = chi2.sf(chi2_stat, df=2 * len(p_values))  # Degrees of freedom = 2 * number of p-values
+            # print(chi2_stat)
+        # elif multi_test == 'stouffer':
+        if multi_test == 'stouffer':
+            p_values = np.clip(p_values, 1e-10, 1-1e-10) # correct for zero/one values to avoid inf when z-scoring
+            # z_scores = norm.ppf(1 - np.array(p_values))
+            # weights = np.ones_like(z_scores)
+            # weighted_z_sum = np.sum(weights * z_scores)
+            # combined_z_score = weighted_z_sum / np.sqrt(np.sum(weights**2))
+            # combined_p_value = norm.cdf(-abs(combined_z_score))
+            # print(z_scores)
+            # print(weighted_z_sum, combined_z_score)
+        combined_res = combine_pvalues(p_values, method=multi_test)
+        combined_p_value = combined_res.pvalue
+            
+        print(f'{clu}: p_val {combined_p_value:.10f}')
     
         if same_plot:
-            axx.plot(xx, yy, linewidth=1)
-            for control in controls:
-                axx.plot(xx, control, color='gray', alpha=0.2, linewidth=0.1)
+            for control in controls[:100]:
+                axx.plot(xx, control, color='gray', alpha=0.1, linewidth=0.1)
+            axx.plot(xx, yy, linewidth=0.5)
+            axx.scatter(xx, yy, 
+                        facecolors=colors, 
+                        # edgecolors='black', 
+                        s=10)
             axx.spines['top'].set_visible(False)
             axx.spines['right'].set_visible(False)
+            axx.set_facecolor('none')
         else:
-            axx[kk].plot(xx, yy, linewidth=1)
-            for control in controls:
-                axx[kk].plot(xx, control, color='gray', alpha=0.2, linewidth=0.1)                             
+            for control in controls[:100]:
+                axx[kk].plot(xx, control, color='gray', alpha=0.1, linewidth=0.1)                             
             axx[kk].spines['top'].set_visible(False)
             axx[kk].spines['right'].set_visible(False)
+            axx[kk].plot(xx, yy, linewidth=0.5)
+            axx[kk].scatter(xx, yy, facecolors=colors, 
+                            # edgecolors='black', 
+                            s=20)
             #axx[kk].spines['left'].set_visible(False)      
             #axx[kk].tick_params(left=False, labelleft=False)
+            axx[kk].text(0.1, max(yy) * 0.9, f'p={combined_p_value:.4f}', fontsize=7, color='black')
+            axx[kk].set_facecolor('none')
                 
             d2 = {}
             for sec in PETH_types_dict[vers]:
@@ -2448,7 +2462,8 @@ def plot_avg_peth_networks(vers, networks, metric='umap_z', clustering='louvain'
     #axx.set_ylabel(feat)
     fg.tight_layout()
     fg.savefig(Path(one.cache_dir,'dmn', 'figs',
-       f'{vers}_avg_peth_wcontrols_{clustering}_resl{resl}.pdf'), dpi=150, bbox_inches='tight')
+       f'{vers}_avg_peth_wcontrols_{clustering}_resl{resl}.pdf'), dpi=100, 
+               bbox_inches='tight', transparent=True)
 
 
 
@@ -2780,13 +2795,14 @@ def get_reproducible_clusters_with_controls(control_list, vers='concat', cluster
     return x0
 
 
-def get_cluster_membership_across_controls(control_list, vers='concat', clustering='louvain'):
+def get_cluster_membership_across_controls(control_list, vers='concat', clustering='louvain', shuffling=False):
     clusters, regs_ordered = {}, {}
     for control in control_list:
-        d = get_reg_dist(algo='umap_z', vers=vers, control=control)
+        d = get_reg_dist(algo='umap_z', vers=vers, control=control, shuffling=shuffling)
         res = d['res']
         regs = d['regs']
-        _, _, regs, cluster_info = clustering_on_connectivity_matrix(res, regs, clustering=clustering)
+        _, _, regs, cluster_info = clustering_on_connectivity_matrix(res, regs, 
+                                                                     clustering=clustering)
         clusters[control] = np.sort(cluster_info)
         regs_ordered[control] = regs
 
@@ -3353,7 +3369,8 @@ def plot_avg_corr_with_dmn_regions(vers, metric='umap_z', rerun=False, cols_dict
 def plot_rastermap(feat='concat_z', exa = False, vers='concat', r=None, control=False,
                    norm_=False, mapping='Beryl', nclus=13, alpha=0.5, bg=False):
     """
-    Function to plot a rastermap with vertical segment boundaries 
+    Function to run rastermap algorithm and plot a rastermap 
+    with vertical segment boundaries 
     and labels positioned above the segments.
 
     Extra panel with colors of mapping.
@@ -3523,14 +3540,17 @@ def get_cross_val_rastermap(control, mapping='Beryl', vers='concat', nclus=13, z
 
 def plot_regional_network_participation(reg, control_list, vers='concat', 
                                         cmap_name='Blues', clustering='louvain',
-                                        plot_raster=True, save=True, annotate=False):
+                                        plot_raster=True, save=True, annotate=False,
+                                        shuffling=False):
     '''
     Get regional network participation for a network, and plot swanson & rastermap
     reg: the focus region for network participation (=1 always for this region)
     control_list: list of control versions to include for participation ratio calculation
     '''
 
-    regs_ordered, clusters = get_cluster_membership_across_controls(control_list, vers)    
+    regs_ordered, clusters = get_cluster_membership_across_controls(control_list, 
+                                                                    vers=vers, 
+                                                                    shuffling=shuffling)    
     regs=regs_ordered[False]
     
     # Get network participation ratio
@@ -3602,7 +3622,7 @@ def plot_regional_network_participation(reg, control_list, vers='concat',
         plt.tight_layout()  # Adjust the layout to prevent clipping
 
         plt.savefig(Path(pth_dmn.parent, 'figs',
-                     f'rastermap_{reg}network.png'), dpi=200)
+                     f'rastermap_{reg}network_shuffle{shuffling}.png'), dpi=200)
 
 
 def plot_swansons_clusters(control, algo='umap_z', vers='concat', k=4, tau=0.01, clustering='louvain'):
@@ -3634,11 +3654,53 @@ def plot_swansons_clusters(control, algo='umap_z', vers='concat', k=4, tau=0.01,
                      f'{vers}_{algo}_{clustering}_ctr{control}_{n}.png'), dpi=200)
 
 
-def plot_regional_hist(cell_regs, start, end, name, normalized=True):
+def rgb_to_hex(rgb):
+    return '#{:02X}{:02X}{:02X}'.format(
+        int(rgb[0] * 255),
+        int(rgb[1] * 255),
+        int(rgb[2] * 255)
+    )
+
+def get_hierarchy_label_and_color(reg):
+    '''
+    Returns a (label, color) tuple for a region. Label is plain text, color is hex.
+    '''
+    a, _ = get_allen_info()
+    a['Beryl'] = br.id2acronym(a['id'].values, mapping='Beryl')
+    a['Cosmos'] = br.id2acronym(a['id'].values, mapping='Cosmos')
+
+    cdict = Counter(a['Cosmos'])
+    cdict.pop('void', None)
+    cdict.pop('root', None)
+    cosmos_ids = br.acronym2id(list(cdict.keys()))
+
+    idp = a['structure_id_path'][a['Beryl'] == reg].values[0]
+    idp = idp.split('/')[-6:-1]
+    cos_i = next(i for i, x in enumerate(idp) if int(x) in cosmos_ids)
+    idp = idp[cos_i:]
+    idp_int = list(map(int, idp))
+
+    label = ' / '.join([
+        f"{get_name(br.id2acronym(x))} ({br.id2acronym(x)[0]})"
+        for x in idp_int
+    ])
+    _, pal = get_allen_info()
+    col = rgb_to_hex(pal[reg])
+    return label, col
+
+
+def plot_regional_hist(plot_data, raster_type, name, start=None, end=None, normalized=True, full_name=False):
     '''
     Plot histogram of selected group of cells' beryl regions
     start & end: two arrays of start/end times for lists of cells to be included
     '''
+    isort = plot_data['isort']
+    cell_regs = plot_data['acs'][isort]
+
+    if start is None or end is None:
+        start=raster_types[raster_type]['start']
+        end=raster_types[raster_type]['end']
+
     regs=[]
     for i in range(len(start)):
         regs.append(cell_regs[start[i]:end[i]])
@@ -3662,10 +3724,32 @@ def plot_regional_hist(cell_regs, start, end, name, normalized=True):
     _, pal = get_allen_info()
     colors=[pal[reg] for reg in categories]
 
-    fig, ax = plt.subplots(figsize=(14, 5), dpi=150)
-    ax.bar(categories, frequencies, color=colors)
-    ax.set_xticklabels(categories, rotation=90, fontsize=4)
-    #ax.set_title(name, fontsize=20)
+    if full_name:
+        fig, ax = plt.subplots(figsize=(18, 14), dpi=150)
+        ax.barh(categories, frequencies, color=colors)
+        ax.set_yticks([])
+        for i, reg in enumerate(categories):
+            label, color = get_hierarchy_label_and_color(reg)
+            ax.text(
+                -0.02, i,  # just below x-axis (tune as needed)
+                label,
+                color=color,
+                # rotation=90,
+                ha='right',
+                va='center',
+                fontsize=5,
+                transform=ax.get_yaxis_transform()
+            )
+        ax.set_title(raster_type, fontsize=20)
+        # ax.text(1.02, 1.0, raster_type, transform=ax.transAxes, 
+        #         rotation=270, ha='left', va='top', fontsize=20)
+        ax.set_xlabel('normalized regional participation', fontsize=15)
+    else:
+        fig, ax = plt.subplots(figsize=(14, 5), dpi=150)
+        ax.bar(categories, frequencies, color=colors)
+        ax.set_xticklabels(categories, rotation=90, fontsize=4)
+        #ax.set_title(name, fontsize=20)
+        ax.set_xlim(left=-4)
 
     # Remove top and right spines
     ax.spines['top'].set_visible(False)
@@ -3673,21 +3757,35 @@ def plot_regional_hist(cell_regs, start, end, name, normalized=True):
     
     ax.set_facecolor('none')
     #ax.set_ylim(0, 0.25)
-    ax.set_xlim(left=-4)
 
-    fig.savefig(Path(pth_dmn.parent, 'figs', f'{name}_regional_hist.pdf'), 
-                dpi=200, transparent=True)
+    if full_name:
+        name = 'SI_' + raster_type
+        plt.subplots_adjust(left=0.55, right=0.98)
+    if normalized:
+        fig.savefig(Path(pth_dmn.parent, 'figs', f'{name}_regional_hist.pdf'), 
+                    dpi=200, transparent=True)
+    else:
+        fig.savefig(Path(pth_dmn.parent, 'figs', f'{name}_regional_hist_count.pdf'), 
+                    dpi=200, transparent=True)
 
+    plt.close()
     return frequencies
 
 
 
-def plot_subset_raster(data, start, end, name):
+def plot_subset_raster(raster_data, raster_type, name, start=None, end=None):
     '''
     Plot raster and avg peth for interested subset(s) of cells
     start & end: two arrays of start/end times for lists of cells to be included
     '''
-    
+    if start is None or end is None:
+        start=raster_types[raster_type]['start']
+        end=raster_types[raster_type]['end']
+
+    spks = raster_data['concat_z']
+    isort = raster_data['isort']
+    data = spks[isort]
+
     plot_data=[]
     for i in range(len(start)):
         plot_data.append(data[start[i]:end[i]])
@@ -3952,4 +4050,162 @@ def save_rastermap_pdf(start=[0], end=None, name=None,
     img.save(Path(pth_dmn.parent, 'figs', f"rastermap{name}.pdf"), "PDF")
 
 
+def plot_cluster_similarity_comparison(control_list, vers, min_cluster_size=3,
+                                       rerun_shuffle=True, algo='umap_z', mapping='Beryl',
+                                       show_colorbar=False): # Default changed to False
+    """
+    Computes and compares cosine similarity matrices between clusters
+    with and without shuffling. Each matrix is ordered via separate hierarchical clustering.
+    Dendrograms are removed. X and Y tick labels are removed for matrices, and X and Y labels are added.
+    Optionally displays a color bar.
 
+    Parameters:
+    - control_list: list of control inputs to be passed to get_cluster_membership_across_controls
+    - vers: network identifier, e.g. 'concat', 'quiescence'
+    - min_cluster_size: minimum number of regions required in a cluster to include it in the analysis
+    - show_colorbar: If True, displays a color bar for the similarity matrices. Defaults to False.
+    """
+
+    if rerun_shuffle:
+        # For the shuffling case, apply same shuffling of regional labels
+        # across controls before computing reg similarity
+        results = smooth_dist(algo=algo, mapping=mapping, vers=vers,
+                              shuffling=True, control_list=control_list)
+        for control in control_list:
+            pth_ = Path(one.cache_dir, 'dmn',
+                        f'{algo}_{mapping}_{vers}_control{control}_smooth_shuffled.npy')
+            res, regs = results[control]
+            d = {'res': res, 'regs': regs}
+            np.save(pth_, d, allow_pickle=True)
+
+    def build_cluster_matrix(regs_ordered, clusters):
+        all_regions = sorted(set(np.concatenate(list(regs_ordered.values()))))
+        region_to_index = {region: idx for idx, region in enumerate(all_regions)}
+
+        cluster_vectors = []
+        cluster_labels = []
+
+        for version in regs_ordered:
+            version_regions = regs_ordered[version]
+            version_clusters = clusters[version]
+            n_clusters = np.max(version_clusters) + 1
+
+            for cluster_id in range(n_clusters):
+                members = version_regions[version_clusters == cluster_id]
+                if len(members) < min_cluster_size:
+                    continue
+
+                vec = np.zeros(len(all_regions))
+                for region in members:
+                    vec[region_to_index[region]] = 1
+                cluster_vectors.append(vec)
+                cluster_labels.append(f"{version}_c{cluster_id}")
+
+        # Ensure cluster_vectors is not empty before stacking
+        if not cluster_vectors:
+            return np.array([]).reshape(len(all_regions), 0), []
+        return np.stack(cluster_vectors, axis=1), cluster_labels
+
+    # Get cluster memberships for shuffled and non-shuffled regional labels
+    regs_no_shuffle, clusters_no_shuffle = get_cluster_membership_across_controls(
+        control_list, vers=vers, shuffling=False
+    )
+    regs_shuffle, clusters_shuffle = get_cluster_membership_across_controls(
+        control_list, vers=vers, shuffling=True
+    )
+
+    # Build matrices
+    X_no_shuffle, labels_no_shuffle = build_cluster_matrix(regs_no_shuffle, clusters_no_shuffle)
+    X_shuffle, labels_shuffle = build_cluster_matrix(regs_shuffle, clusters_shuffle)
+
+    if X_no_shuffle.shape[1] == 0 or X_shuffle.shape[1] == 0:
+        print("No clusters met the minimum size requirement in one of the conditions.")
+        return
+
+    # Compute similarity matrices
+    sim_no_shuffle = cosine_similarity(X_no_shuffle.T)
+    sim_shuffle = cosine_similarity(X_shuffle.T)
+
+    # Hierarchical clustering for ordering
+    linkage_no_shuffle = linkage(1 - sim_no_shuffle, method='average')
+    linkage_shuffle = linkage(1 - sim_shuffle, method='average')
+    order_no_shuffle = leaves_list(linkage_no_shuffle)
+    order_shuffle = leaves_list(linkage_shuffle)
+
+    sim_no_shuffle_ordered = sim_no_shuffle[order_no_shuffle][:, order_no_shuffle]
+    sim_shuffle_ordered = sim_shuffle[order_shuffle][:, order_shuffle]
+    labels_no_shuffle_ordered = [labels_no_shuffle[i].replace("False_c", "full data_c") for i in order_no_shuffle]
+    labels_shuffle_ordered = [labels_shuffle[i].replace("False_c", "full data_c") for i in order_shuffle]
+
+    # Plot similarity matrices without dendrograms
+    fig_width = 10
+    if show_colorbar:
+        fig_width += 2
+    fig = plt.figure(figsize=(fig_width, 7))
+    gs = GridSpec(1, 2, width_ratios=[1, 1])
+
+    # Similarity matrices
+    ax_matrix1 = fig.add_subplot(gs[0, 0])
+    im1 = ax_matrix1.imshow(sim_no_shuffle_ordered, cmap='viridis', vmin=0, vmax=1)
+    ax_matrix1.set_xticks([])
+    ax_matrix1.set_yticks([])
+    ax_matrix1.set_xlabel('All clusters from different trial splits', fontsize=12) # Updated x-label
+    ax_matrix1.set_ylabel('All clusters from different trial splits', fontsize=12) # Updated y-label
+    ax_matrix1.set_title("True Region Labels", fontsize=16)
+
+
+    ax_matrix2 = fig.add_subplot(gs[0, 1])
+    im2 = ax_matrix2.imshow(sim_shuffle_ordered, cmap='viridis', vmin=0, vmax=1)
+    ax_matrix2.set_xticks([])
+    ax_matrix2.set_yticks([])
+    ax_matrix2.set_xlabel('All clusters from different trial splits', fontsize=12) # Updated x-label
+    ax_matrix2.set_ylabel('All clusters from different trial splits', fontsize=12) # Updated y-label
+    ax_matrix2.set_title("Shuffled Region Labels", fontsize=16)
+
+
+    ax_matrix1.set_facecolor('none')
+    ax_matrix2.set_facecolor('none')
+
+    # Colorbar - conditionally added
+    if show_colorbar:
+        cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
+        fig.colorbar(im1, cax=cbar_ax)
+        cbar_ax.set_facecolor('none')
+        plt.tight_layout(rect=[0, 0, 0.91, 0.95])
+    else:
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    plt.suptitle(f"{vers}", fontsize=20)
+    plt.savefig(Path(pth_dmn.parent, 'figs',
+                     f'cluster_sim_comparison_{vers}.pdf'),
+                transparent=True, dpi=200)
+    plt.close()
+
+
+def plot_log_hist_freqs(frequencies, name):
+    x = np.arange(1, len(frequencies) + 1)
+    
+    # Create a figure with two subplots side by side
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5)) # 1 row, 2 columns
+    
+    # Plot 1: Log-Log plot
+    ax1.loglog(x, frequencies, marker='o', markersize=2)
+    ax1.set_xlabel('X-axis (Log Scale)')
+    ax1.set_ylabel('Frequencies (Log Scale)')
+    ax1.set_title('Log-Log Plot of Frequencies')
+    # ax1.grid(True, which="both", ls="-", color='0.7')
+    
+    # Plot 2: Log-Y (Semi-Log) plot
+    ax2.semilogy(x, frequencies, marker='o', markersize=2)
+    ax2.set_xlabel('X-axis (Linear Scale)')
+    ax2.set_ylabel('Frequencies (Log Scale)')
+    ax2.set_title('Semi-Log (Log-Y) Plot of Frequencies')
+    # ax2.grid(True, which="both", ls="-", color='0.7')
+    
+    # Adjust layout to prevent overlap
+    plt.tight_layout()
+    plt.suptitle(name)
+
+    plt.savefig(Path(pth_dmn.parent, 'figs', f'{name}_regional_hist_logscale.pdf'), 
+                    dpi=100, transparent=True)
+    
