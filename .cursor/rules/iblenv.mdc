@@ -1,0 +1,14 @@
+---
+description: Use the iblenv conda env for every Python command
+alwaysApply: true
+---
+
+# Python environment
+
+Run Python with the existing conda env `iblenv`. Do not create a new env, and do not use the base interpreter or other local envs (`ibl_bwm`, `ibl_repro_ephys`, `bioplnn`, `python-general`).
+
+```bash
+/Users/ariliu/opt/anaconda3/envs/iblenv/bin/python script.py
+```
+
+`brainwidemap` is not installed in `iblenv` and is not needed for cached analyses (`regional_group`, `fig5.py`, `seq_analysis.py`). `dmn_bwm.py` and `dmn_ari.py` still import it at module level. If that import fails, set `PYTHONPATH=/Users/ariliu/int-brain-lab/paper-brain-wide-map` instead of installing the package. See `AGENTS.md`.
