@@ -208,108 +208,10 @@ This is the strongest remaining difference. Caveat: the correlograms depend on c
 2. Cross-trial-type magnitude: mostly explained by noise.
 3. Cross-trial-type structure and response spread: not explained by noise. The band widens over the trial in stim/integ cells (within and across types) and survives matched noise; it is flat in sequence cells. Stim/integ cells share time-locked structure across trial types, which survives sequence-level noise in the bin x bin matrices and especially in the 2D cross-correlograms. Sequence cells lack it, and show same-trial-type block structure that noisy stim/integ cells lack.
 
-## Reliability with the train-half diagonal removed
+## Reliability of sequence cells (moved)
 
-Run: `python seq_noise_match.py --peak-mask` (`run_peak_mask`). Outputs: `peak_masked_reliability.{png,json}` in the same folder.
+Moved 2026-11-19 to [SEQ_RELIABILITY.md](SEQ_RELIABILITY.md): split-half reliability with the train-half peak removed, where the peaks fall (the three noisy trial types), and split-half r on subsets of trial types.
 
-Why: sequence cells were picked because their train-half peaks form a sharp diagonal, and that diagonal is mostly gone in the test half. The low reliability could therefore come from the peak alone, a large train-only deviation that dominates the correlation, while the rest of the row (the faint sequence) still reproduces.
-
-Method:
-- For each cell, find the peak bin of the train PETH over the six trial types.
-- Drop a window of ±w bins around it, inside that trial type, from both halves.
-- Correlate train and test over the remaining bins.
-- Control: drop a window of the same size around a random bin instead.
-
-### Results
-
-The table gives the median split-half r, with the mean in brackets.
-
-| half-width w (bins) | sequence, peak removed | sequence, random removed | stim/integ, peak removed |
-|---|---|---|---|
-| none (all bins) | 0.016 (0.044) | — | 0.396 (0.408) |
-| 0 | 0.019 (0.045) | 0.018 | 0.399 |
-| 2 | 0.023 (0.045) | 0.018 | 0.393 |
-| 6 | 0.025 (0.046) | 0.018 | 0.393 |
-| 10 | 0.025 (0.047) | 0.017 | 0.399 |
-| 20 | 0.026 (0.048) | 0.016 | 0.410 |
-
-#### Variant: remove each half's own peak
-
-Here the window around the train peak and the window around the test peak are both dropped, from both halves (`both` in the json). The control drops two random windows (`rand2`).
-
-| half-width w (bins) | sequence, both peaks removed | sequence, 2 random removed | stim/integ, both peaks removed |
-|---|---|---|---|
-| 0 | 0.020 (0.045) | 0.018 | 0.398 |
-| 2 | 0.027 (0.047) | 0.019 | 0.391 |
-| 6 | 0.033 (0.053) | 0.017 | 0.394 |
-| 10 | 0.032 (0.054) | 0.017 | 0.399 |
-| 20 | 0.035 (0.058) | 0.016 | 0.420 |
-
-The test-half peak of a sequence cell is mostly a noise maximum, so dropping it removes another large deviation that doesn't replicate. Reliability rises a little more, but stays far below stim/integ cells: the median peaks at 0.035. Dropping the test peak is a selection on the test half. Removing a noise maximum from one half can only weaken that half's spurious deviation, not create agreement between the halves, so this is a reasonable upper bound.
-
-Average z-scored rate at the train-half peak bin, relative to the row mean:
-
-| | train | test | test / train |
-|---|---|---|---|
-| sequence | 6.45 | 0.16 | 2.5% |
-| stim/integ | 4.95 | 1.35 | 27% |
-
-### Takeaways
-
-- Removing the diagonal barely changes sequence-cell reliability. The median goes from 0.016 to 0.025, flat beyond w ≈ 4, against 0.018 for random removal. Also removing the test-half peak gives 0.035 at most.
-- Outside their train peak, sequence cells have essentially no reproducible structure on these six trial types. Their low reliability is not caused by the train-only peak swamping a reliable faint signal.
-- The faint sequence does replicate, but weakly. In the peak-aligned average, the test half shows a small bump about ±10 bins wide at the train peak: 0.16 z, against a standard error of about 0.01 over 12k cells. That is about 2.5% of the train peak, compared with 27% for stim/integ cells. The two halves are disjoint trials and cells were selected on the train half only, so this bump is not a selection artefact.
-- For the noise match, the sequence target barely moves (mean 0.044 → 0.048). The noise-matched results above stand.
-- Side note: the train peak-aligned average has sharp steps at ±6 bins. Together with the noise autocorrelation reaching 0 at lag 6, this suggests the PETHs are boxcar-smoothed over about 6 bins. Confirmed in `concat_PETHs`: see "Bin size and smoothing" below.
-
-## Rasters with peaks removed, and where the peaks fall
-
-`plot_peak_masked_rasters` (also run by `--peak-mask`) shows sequence cells over the six trial types, with ±6 bins around both the train-half and the test-half peak removed (red). Output: `raster_seq_peaks_removed.{png,pdf}` and `raster_seq_test_sorted.{png,pdf}`.
-
-Rendering note: removed bins are NaN. With the default downsampling, a screen row covering about 16 cells turns fully red if any one of them is NaN, so whole trial types looked removed. Colours are now resampled after mapping (`interpolation_stage='rgba'`), so red intensity shows the fraction removed.
-
-- **Train and test, peaks removed, stack order (Rastermap fit on train):** once the train peaks are cut out, no diagonal is left in the train half. The test half shows at most a faint trace along the same path.
-- **Test half sorted by a Rastermap fit on the unmasked test half:**
-  - The test half gets its own sharp diagonals, as clean as the train ones.
-  - They sit in the same three trial types as the train diagonals: change_b, L_sL_cR_b and R_sR_cL_b. They are built from the test-half peaks, which are almost all removed by the mask.
-  - Sorting either half of these cells by peak produces a diagonal.
-
-### Peaks land in the noisiest trial types
-
-Over the six trial types (block_change, L_sL_cL_b, L_sL_cR_b, R_sR_cR_b, R_sR_cL_b, mistake):
-
-| | train peak in each type | test peak in each type | mean within-type SD, test (by type) |
-|---|---|---|---|
-| sequence | .34 / .01 / .30 / .01 / .30 / .04 | .32 / .02 / .30 / .02 / .26 / .07 | 1.28 / 0.66 / 1.29 / 0.68 / 1.24 / 0.90 |
-| stim/integ | .31 / .04 / .30 / .02 / .27 / .06 | .32 / .04 / .30 / .02 / .28 / .06 | 1.37 / 0.94 / 1.36 / 0.92 / 1.36 / 1.02 |
-
-| | same peak trial type in both halves (chance) | peak-time r within the same type | median shift between halves |
-|---|---|---|---|
-| sequence | 0.35 (0.28) | 0.12 | 19 bins |
-| stim/integ | 0.33 (0.27) | 0.59 | 7 bins |
-
-- Rows are z-scored over the whole stack, and change_b, L_sL_cR_b and R_sR_cL_b have about twice the within-type SD of the other three, in both halves and in both groups. These are the block-change and incongruent trial types, and they have about 5x fewer trials (confirmed below).
-- A row's maximum therefore almost always falls in one of these three types, whether the row is signal or noise. That is why the sequence diagonals sit exactly there.
-- Within a type, a sequence cell's peak time barely carries over between halves (r = 0.12; a median shift of 19 bins is close to the roughly 21 expected by chance). Stim/integ peaks do carry over (r = 0.59).
-- Working hypothesis: the train-half diagonals of the sequence cells are mostly the peaks of noise in the fewest-trial trial types, sorted by peak time. What replicates is a small bump (0.16 z, about 2.5% of the train peak). Selecting cells on noise maxima in one half and showing them in the other gives exactly this "present in train, gone in test" picture.
-
-### Split-half r without the noisy trial types
-
-`type_subset_reliability` (also run by `--peak-mask`). Output: `type_subset_reliability.json`, which also has the mean within-type SD for all 21 trial types.
-
-| trial types | sequence median (mean) | stim/integ median (mean) |
-|---|---|---|
-| six analysed types | 0.016 (0.044) | 0.396 (0.408) |
-| three noisy (change_b, L_sL_cR_b, R_sR_cL_b) | 0.000 (0.032) | 0.314 (0.337) |
-| three quiet (L_sL_cL_b, R_sR_cR_b, mistake) | 0.063 (0.089) | 0.614 (0.555) |
-| all 21 types | 0.077 (0.103) | 0.482 (0.483) |
-| all except the noisy three and their movement-aligned copies (15 types) | 0.154 (0.191) | 0.662 (0.619) |
-
-- The movement-aligned copies are noisy too: about 1.25 SD, against about 0.65 for the congruent types. The trial-type-independent periods are quieter still (inter_trial, block, quiescence, choice: 0.36-0.56). mistake and fback0 sit in between, at about 0.9, which also fits rarer trials.
-- The noisy types have about 5.1-5.6x fewer trials (see below). Pure 1/√n would give an SD ratio of 2.3-2.4; the observed 1.9 is somewhat lower, because the SD also includes signal and the rows are z-scored over all types.
-- Dropping the noisy types raises sequence-cell reliability about 4x on the stimulus-aligned types (0.016 → 0.063) and to 0.154 over the 15 remaining types. So sequence cells do carry reproducible structure, mostly outside the trial types where their diagonals sit.
-- Their reliability is still about 4-10x below stim/integ cells on the same subsets. The noisy types pull stim/integ reliability down too (0.61 → 0.40 when they are included).
-- The noise match above was done on the six types. A version restricted to the quiet types would have a higher target, about 0.06-0.09.
 
 ## Trial membership and counts
 
@@ -408,13 +310,13 @@ Peaks over the six types:
 What these show:
 
 - **Firing rate does not explain the low reliability.** At every firing rate, sequence cells are less reliable than other cells (`fr_control.png`, middle panels). On the 15 quiet types, the gap is 0.12 vs 0.29 in the lowest-rate bins and 0.31 vs 0.83 in the highest. Every partner set is 2-4x more reliable than the sequence cells, on every subset of types, including the 15 quiet types where sequence cells were not selected.
-- **The train-peak carry-over is not larger than in matched cells.** (2026-11-05 correction: this section originally said "no sign of a sequence". That overstated it. The faint test-half diagonal is real signal, and the cross-half analysis below shows it tiles time. What this control shows is only that the train-peak measure doesn't single out sequence cells.) Partners that pass the same peak selection (same peak type, similar height) carry their peaks over at least as well as sequence cells: test height at the train peak 0.39 vs 0.16, peak-time r 0.20 vs 0.11. With off-peak reliability also matched, the partners still match or beat sequence cells (0.23 vs 0.16; r 0.12 vs 0.11).
+- **The train-peak carry-over is not larger than in matched cells.** (2026-11-05 correction: this section originally said "no sign of a sequence". That overstated it. The faint test-half diagonal is real signal, and the cross-half analysis in [SEQ_RELIABILITY.md](SEQ_RELIABILITY.md) shows it tiles time. What this control shows is only that the train-peak measure doesn't single out sequence cells.) Partners that pass the same peak selection (same peak type, similar height) carry their peaks over at least as well as sequence cells: test height at the train peak 0.39 vs 0.16, peak-time r 0.20 vs 0.11. With off-peak reliability also matched, the partners still match or beat sequence cells (0.23 vs 0.16; r 0.12 vs 0.11).
   - So the faint test-half bump (0.16 z) is no larger than what any low-rate cell selected on its train peak shows.
   - It is a little smaller, because sequence cells have the least real signal of all.
 - **Rastermap on the partners finds no diagonals.** The fr+region partners, given their own Rastermap fit on the train half, sort into blocky responses that reproduce in the test half (`fr_control_rasters.png`, column 2). There is no diagonal.
   - Sorting either set by train peak time gives an equally sharp diagonal that is mostly gone in the test half (columns 3-5).
   - In those sorts, the change_b rows also light up in block_change_m in both sets. That is the same trials counted in both windows, not a property of sequence cells.
-- **Reading:** the sharp train-half diagonals that defined the clusters are noise peaks in the fewest-trial types. Sequence cells are also the least reliable low-rate cells overall. Their weak but reproducible timing is analysed in "Cross-half bin x bin correlation" below. Why they are less reliable than other cells at the same rate (for example bursty or unstable units, or multi-unit contamination) is not known; unit QC metrics would show it.
+- **Reading:** the sharp train-half diagonals that defined the clusters are noise peaks in the fewest-trial types. Sequence cells are also the least reliable low-rate cells overall. Their weak but reproducible timing is analysed in [SEQ_RELIABILITY.md](SEQ_RELIABILITY.md), "Cross-half bin x bin correlation". Why they are less reliable than other cells at the same rate (for example bursty or unstable units, or multi-unit contamination) is not known; unit QC metrics would show it.
 
 ### Stimulus- vs movement-aligned
 
@@ -440,78 +342,16 @@ It does this for all cells, and for each sequence family on its own diagonal typ
   - The R_sR_cL_b family was selected in the stimulus copy (only 17% have their train peak in the movement copy).
   - The other two families split almost evenly. That fits clusters 45-47 carrying the L_sL_cR_b diagonal only in `sLbRchoiceL`.
   - In no family and in neither alignment does the test bump exceed the matched partners'.
-- **Conclusion (single-cell peaks only):** carry-over of each cell's train peak is no larger than in matched cells, in either alignment. Per-cell peaks are too noisy to settle the question. The population cross-half analysis below does show a preference: sequence-cell timing is stimulus-locked.
+- **Conclusion (single-cell peaks only):** carry-over of each cell's train peak is no larger than in matched cells, in either alignment. Per-cell peaks are too noisy to settle the question. The population cross-half analysis ([SEQ_RELIABILITY.md](SEQ_RELIABILITY.md)) does show a preference: sequence-cell timing is stimulus-locked.
 
-## Cross-half bin x bin correlation
+## Cross-half bin x bin correlation (moved)
 
-Added 2026-11-05. Script: `seq_crosshalf.py`. Outputs: `dmn/figs/figure5_new/crosshalf/`, which holds `crosshalf_concat.png`, `crosshalf_profiles.png`, `crosshalf_families.png`, `crosshalf_cross_type.png` and `summary.json`. The run takes a few minutes, mostly the bootstraps.
+Moved 2026-11-19 to [SEQ_RELIABILITY.md](SEQ_RELIABILITY.md): the train x test bin x bin correlation (sequence cells tile the 150 ms after the stimulus reproducibly, mostly in the congruent types), and how much of that tiling is shared across trial types.
 
-Why: the question is not whether each cell's sharp train peak replicates. It is whether what is left in the test half is a weak but consistent tiling of time during the stimulus. The within-test-half bin x bin matrices can't show that: their diagonal band is the noise autocorrelation from the 12.5 ms boxcar (see above).
-
-The fix is to correlate the train half at bin t with the test half at bin t', across cells: C(t, t'). The halves are disjoint trials, so their noise is independent and the band disappears. Any diagonal left in C is reproducible timing. Before correlating:
-
-- each cell's mean is removed per segment and half, so level differences between trial types don't count
-- each column is z-scored across cells, which removes the population-mean time course
-
-From C, per trial type:
-
-- **ridge:** mean C by |t − t'|, minus the mean at lags 15-30; its height at lag 0 and its half width
-- **decoding:** for each test bin, the train bin with the highest C (a template match), counted as correct within ±2 bins; chance is 5/72 = 0.07
-- **cross-type:** the same ridge between the train half of type a and the test half of type b
-
-Confidence intervals are 2.5-97.5 percentiles over 100 bootstraps over insertions.
-
-### Sequence cells tile time reproducibly during the stimulus
-
-Ridge height and decoding accuracy, stimulus-aligned (95% CI in brackets):
-
-| | change_b | L_sL_cL_b | L_sL_cR_b | R_sR_cR_b | R_sR_cL_b | mistake |
-|---|---|---|---|---|---|---|
-| sequence, height | 0.019 [0.011, 0.027] | 0.117 [0.099, 0.131] | 0.029 [0.024, 0.036] | 0.100 [0.089, 0.112] | 0.031 [0.023, 0.036] | 0.040 [0.030, 0.049] |
-| sequence, decoding | 0.21 | 0.65 | 0.40 | 0.53 | 0.40 | 0.49 |
-| fr+region, height | 0.041 | 0.193 | 0.046 | 0.174 | 0.053 | 0.062 |
-| fr+peak, height | 0.057 | 0.243 | 0.063 | 0.237 | 0.079 | 0.089 |
-| stim/integ, height | 0.351 | 0.768 | 0.360 | 0.750 | 0.354 | 0.537 |
-| stim/integ, decoding | 0.67 | 0.94 | 0.58 | 0.93 | 0.83 | 0.82 |
-
-- **There is a significant cross-half ridge in every trial type.** From the test half alone, the time bin can be decoded at 3-9x chance. So the faint test-half diagonal is real and tiles the 150 ms after the stimulus. This replaces the "no sequence" reading of the firing-rate control above.
-- **It is temporally structured, not a single slow component.** The ridge half width is about 10-12 bins (21-25 ms). Two 6-bin boxcars alone would give about 3. The other groups have about the same half width (stim/integ about 9-10 bins).
-- **It is strongest in the congruent types, not in the families' own diagonal types.** On their own type, the families' ridges are the weakest of the six:
-
-  | family | ridge on own type | ridge in L_sL_cL_b / R_sR_cR_b |
-  |---|---|---|
-  | R_sR_cL_b | 0.047 | 0.12 / 0.10 |
-  | L_sL_cR_b | 0.034 | 0.11 / 0.08 |
-  | change_b | 0.028 | 0.12 / 0.12 |
-
-  - The reproducible tiling therefore follows trial count (the congruent types have about 5x more trials), not the type where the train diagonal was drawn.
-  - The diagonal C(t, t) is U-shaped: strongest in the first about 20 and the last about 12 bins, weakest around bins 30-55 (`crosshalf_families.png`).
-- **The congruent blocks also carry a slow early-vs-late component.** There is a warm late×late corner and cold early×late corners, in sequence cells as in every other group.
-- **It is stimulus-locked.** The ridge is lower in every movement-aligned copy (for example 0.069 vs 0.117 in L_sL_cL_b), and decoding falls to 0.12-0.19. The movement copies have more trials, so the drop isn't noise. The ratio is close to the partners' (0.14 vs 0.19) and to stim/integ (0.49 vs 0.77).
-- **Not specific to sequence clusters.** Rate-matched partners have the same tiling at about 1.7-2x the height, with the same width and the same type pattern. Sequence cells look like the weakest end of a brain-wide stimulus-locked response of low-rate cells; nothing marks them as a separate sequence population.
-
-### Does the tiling carry trial-type information? Side, yes
-
-Ratio of the cross-type ridge to √(within_a · within_b). It is 1 if a cell's time course is the same in both trial types.
-
-| | pooled (all pairs except change_b-mistake) | same side, other block | same block, other side | other side and block |
-|---|---|---|---|---|
-| sequence | 0.81 [0.76, 0.88] | 0.84 [0.77, 0.94] | 0.69 [0.63, 0.76] | 0.70 [0.64, 0.75] |
-| fr+region | 0.82 [0.79, 0.86] | 0.91 [0.87, 0.96] | 0.76 [0.71, 0.81] | 0.71 [0.68, 0.76] |
-| fr+peak | 0.80 [0.78, 0.83] | 0.91 [0.89, 0.95] | 0.72 [0.68, 0.76] | 0.67 [0.64, 0.70] |
-| stim/integ | 0.95 [0.94, 0.96] | 0.96 [0.96, 0.98] | 0.93 [0.92, 0.95] | 0.91 [0.90, 0.93] |
-
-Pairs of the four stimulus types: same side, other block = L_sL_cL_b–L_sL_cR_b and R_sR_cR_b–R_sR_cL_b; same block, other side = L_sL_cL_b–R_sR_cL_b and L_sL_cR_b–R_sR_cR_b; both differ = the congruent pair and the incongruent pair.
-
-- **About 20% of the tiling is trial-type specific, mostly by side.** About 30% of the ridge is lost when the side differs (with or without a block change), and much less when only the block differs. These are correct trials, so stimulus side and choice side can't be separated here.
-  - Rate-matched cells carry the same amount of side information.
-  - Stim/integ cells carry much less: their response is nearly the same in every type (0.91-0.96), as the overall-r analysis found.
-- **Block: a hint only.** The same-side, other-block ratio is 0.84 for sequence cells against 0.91 for both partner sets. The CIs overlap, so this isn't established. It fits the block-R level coupling seen in the overall-r decomposition, and it is the place to look for block information specific to sequence cells (see the open items).
-- **change_b × mistake is an artefact.** That pair's ridge is 3.4x the prediction from its two within-type ridges (2.1x and 1.8x in the partners). That is the shared trials: a trial in the train list of one type can be in the test list of the other, so the same spikes sit on both sides. It is excluded from the pooled ratio.
 
 ## Spike-thinned stim/integ cells
 
-Added 2026-11-13. Scripts are in `stint_thin/`. Status: written and tested locally, not yet run on ORCD.
+Added 2026-11-13. Scripts are in `stint_thin/`. Status: run on ORCD 2026-11-13; metrics below (2026-11-14).
 
 ### Why the Gaussian noise control is not enough
 
@@ -573,18 +413,156 @@ The current builder is on `int-brain-lab/bwm_dmn` main, not in the local `dmn_ne
 
   The defaults are 8 shards on `pi_fiete` at 6 G, then the stack job. Output goes to `$ONE_CACHE_DIR/dmn/res/stint_thin/`. `PARTITION=mit_preemptable` adds `--requeue`, and shards skip insertions already written.
 
-Next, after the run: z-score the thinned rows and rerun the `seq_noise_match.py` metrics with thinned stim/integ cells next to the Gaussian-noise ones. Also fit Rastermap on the thinned train half, to see whether train-only diagonals appear.
+### Results: noise-match metrics on thinned cells
+
+`seq_thin_match.py` reads `OUT/{variant}.npz` (rsynced to `~/Downloads/stint_thin/`). It z-scores each half over all 1,872 bins, as the stack builder does, and runs the `seq_noise_match.py` metrics on the six analysed types of the test half. Sequence, stim/integ and Gaussian rows come from the `noise_match/cache.pkl`. Output is in `figs/figure5_new/thin_match/` (`summary.json`, `metrics.png`, `reliability.png`, `rasters_test.png`, `within_type_corr.png`, `cross_type_corr.png`).
+
+- `p100` reproduces the stack: max |Δz| 6.5e-6 (float32), and every metric equals stim/integ.
+- Thinning leaves 1–11 of 3,632 rows without a spike in one half, depending on the seed. Those rows are set to 0.
+- `rate_rank` and `rate_median` agree to within seed SD on everything, so only rank is quoted below.
+
+Reliability and row shape (test half, per-cell medians; ρ is the mean over cells and 5 seeds):
+
+| | ρ mean | ρ median | skew | kurtosis | max z | min z | floor frac |
+|---|---|---|---|---|---|---|---|
+| sequence | 0.044 | 0.016 | 1.84 | 3.89 | 5.56 | −0.87 | 0.50 |
+| stim/integ | 0.408 | 0.396 | 0.90 | 0.95 | 4.98 | −1.32 | 0.12 |
+| stim/integ + Gaussian (mean) | 0.046 | 0.041 | 0.10 | 0.02 | 3.15 | −2.65 | 0.00 |
+| stim/integ thinned (rank) | 0.176 | 0.133 | 1.66 | 3.08 | 5.92 | −0.82 | 0.45 |
+
+Correlation metrics (mean ± SD over 5 seeds):
+
+| | local | far | spread within | cc between, diag | spread cross | overall r full | level | time |
+|---|---|---|---|---|---|---|---|---|
+| sequence | 0.552 | 0.028 | 0.001 | 0.034 | −0.003 | 0.035 | −0.005 | 0.041 |
+| stim/integ | 0.663 | −0.062 | 0.197 | 0.385 | 0.141 | 0.422 | 0.175 | 0.447 |
+| + Gaussian (mean) | 0.523 | 0.002 | 0.017 | 0.046 | 0.014 | 0.049 | 0.010 | 0.054 |
+| + Gaussian (rank) | 0.535 | −0.008 | 0.028 | 0.083 | 0.020 | 0.087 | 0.039 | 0.092 |
+| thinned (rank) | 0.581 | −0.037 | 0.080 ± 0.003 | 0.187 ± 0.002 | 0.051 ± 0.002 | 0.203 | 0.075 | 0.215 |
+
+Readout:
+
+- **Row shape: rate explains it.** Thinning to the sequence rates gives sequence-like rows: skewed, heavy-tailed, about half the bins at the floor, and tall peaks. The Gaussian control gives the opposite. So rate alone accounts for the shape difference that Rastermap sees.
+- **Reliability: rate explains about two-thirds of the gap, not all of it.** At sequence-matched rates, stim/integ ρ falls from 0.41 to 0.18, but sequence cells are at 0.04. Sequence cells are less reliable than stim/integ cells at the same rate. This agrees with the firing-rate matched control.
+- **Structure: thinned stim/integ cells keep about half of it.** Every structure metric lands about halfway between stim/integ and sequence: cross-type diagonal 0.19, spread within 0.08, overall r 0.20. That is far above sequence, and above the Gaussian controls, which were matched to the lower sequence reliability. So rate alone does not make stim/integ cells look like sequence cells. The comparison is not yet at equal reliability, though.
+
+### Thinned + noise: rate and reliability both matched
+
+`seq_thin_match.py --noise` adds noise to the thinned rows until the mean split-half reliability equals the sequence mean (0.044). The level is calibrated on seed 0 and then applied to 5 fresh noise draws per seed. Both noise models use the sequence-noise temporal kernel and the shared change/mistake noise.
+
+- **gauss**: `add_noise` on the z-scored rows, the same model as the Gaussian control. Uniform target ρ is 0.084 (rank) / 0.085 (median).
+- **count**: noise on the raw half-average rate, with SD c·√P per bin, then z-scored. c = 0.52 (rank) / 0.51 (median). Bins with no spikes get no noise. Nonzero bins can go negative, though, so the floor is no longer at the zero bins.
+
+Flat thinned rows get no noise and are set to 0. Rank and median again agree, so rank is shown:
+
+| | ρ mean | skew | kurtosis | max z | min z | local | far | spread within | cc diag | spread cross | overall r | level | time |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| sequence | 0.044 | 1.84 | 3.89 | 5.56 | −0.87 | 0.552 | 0.028 | 0.001 | 0.034 | −0.003 | 0.035 | −0.005 | 0.041 |
+| sequence (n matched) | | | | | | 0.552 | 0.027 | 0.003 ± 0.003 | 0.036 | −0.003 | 0.036 | −0.004 | 0.042 |
+| stim/integ + Gaussian (mean) | 0.046 | 0.10 | 0.02 | 3.15 | −2.65 | 0.523 | 0.002 | 0.017 | 0.046 | 0.014 | 0.049 | 0.010 | 0.054 |
+| thinned + gauss | 0.043 | 0.71 | 0.87 | 4.36 | −2.23 | 0.525 | −0.009 | 0.027 ± 0.004 | 0.055 | 0.018 | 0.058 | −0.012 | 0.065 |
+| thinned + count | 0.041 | 1.26 | 4.31 | 5.43 | −3.12 | 0.446 | −0.008 | 0.010 ± 0.003 | 0.044 | 0.006 ± 0.003 | 0.046 | 0.001 | 0.049 |
+
+Readout:
+
+- **With rate and reliability both matched, the stim/integ metrics fall to about sequence levels.** With count noise, cross-type diagonal is 0.044 vs 0.034, overall r 0.046 vs 0.035, the level part about 0, and spread cross 0.006 vs −0.003.
+- **Spread within type**: thinned + count gives 0.010 ± 0.003, against 0.001 for sequence (0.003 ± 0.003 for the n-matched subsample), so the gap is about 2 SD of seed noise. The earlier "spread over time is still different" result (Gaussian control: 0.017) shrinks to this once the rate is matched as well. It still needs the deferred bootstrap over insertions.
+- **Local r** is lower for count noise (0.45 vs 0.55). Rate-scaled noise is less smooth within a row than the sequence cells' own noise, so this metric reflects the noise model, not structure.
+- **Thinned + gauss** sits slightly above the original Gaussian control on every structure metric. Its rows lose the sparse shape (floor 0, kurtosis 0.9), so it is the weaker of the two models.
+- **Conclusion**: at the half-average level, a stim/integ population thinned to sequence rates and degraded to sequence reliability is close to indistinguishable from the sequence population on the figure 5 correlation metrics. What separates the groups in these metrics is mostly rate plus reliability. That leaves one question open: why are sequence cells less reliable than stim/integ cells at the same rate? See the unit-quality item below.
+
+Figures: `thin_match/fig5f_thin_noise.png` (panel f) and `thin_match/metrics_thin_noise.png` (metric bars), rank variant only.
+
+- **Panel f is the exception.** The population-average PETH of thinned + count still ramps up within each trial type, to about 0.1 z by mid-trial, while sequence stays flat near 0. Thinned + gauss and the original Gaussian control sit higher, at about 0.15–0.18. The noise shrinks the average response but cannot remove it, because the stim/integ cells share a response sign that sequence cells lack. The correlation metrics miss this, because they are computed across cells after each row is centred. So a shared mean response still separates the groups after rate and reliability are matched.
+
+Next:
+
+- 2D cross-correlograms (ctxt seq similarity) for thinned + count. They are not in `seq_thin_match.py` yet, and they were the clearest remaining difference under the Gaussian control.
+- Fit Rastermap on the thinned (+ count) train half, to see whether train-only diagonals appear.
+
+### Rastermap with the thinned + count cells added
+
+Added 2026-11-16. Script: `seq_thin_rastermap.py` (`fit`, then `plot`). Output: `figs/figure5_new/thin_rastermap/` (`fit.npz`, `summary.json`, `rasters.png`, `composition.png`), with copies in `journals/figs/thin_rastermap_*.png`.
+
+- Synthetic cells: `rate_rank` seed 0, count noise with c = 0.523, a fresh noise draw (seed 2026). Mean split-half ρ is 0.039, against 0.044 for sequence cells.
+- Their train-half rows were appended to `concat_z_train` of the full stack, keeping all 54,569 real cells and their original stim/integ parents. Rastermap was refit with the fig5 settings on all 58,201 rows. One synthetic row has no train spike and was dropped. Real cells keep their group labels from the stored fit.
+- Settings: `grid_upsample=0`, which is what the stored fit used. It makes `rm_labels` contiguous along `isort`, and the old `FIG5_CLUSTERS.md` snippet left it out (now fixed). The cluster assignment does not depend on it, only the order inside the sort does. With these settings, a refit on the real stack alone is deterministic (ARI 1.0 run to run), but it does not reproduce the stored fit (ARI 0.36). New cluster ids therefore do not map onto the fig5 picks.
+- Whole-sort rasters, the same layout used to pick clusters: `rm_clusters_{0_24,25_49,50_74,75_99}.png`. A left strip marks each row's group, and each label gives the cluster id with its synthetic share.
+
+| group | cells | in sequence-majority clusters | in stim/integ-majority clusters |
+|---|---|---|---|
+| sequence | 12,182 | 0.81 | 0.01 |
+| stim/integ (real) | 3,632 | 0.06 | 0.78 |
+| thinned + count | 3,631 | 0.45 | 0.21 |
+| other | 38,755 | 0.07 | 0.03 |
+
+"Sequence-majority" (28 of 100 clusters) means sequence cells make up more than half of the cluster's sequence + stim/integ + synthetic cells. "Stim/integ-majority" (9 clusters) is defined the same way. 14% of synthetic cells share a cluster with their own parent cell, against 1.9% for a random stim/integ cell.
+
+- **No cluster of their own.** Synthetic cells are 6.2% of all cells. No cluster is more than 24% synthetic, and none is majority synthetic. The highest shares (14–24%) are in the stim/integ clusters 24–29 and 33. Next come the sequence-diagonal clusters (17–22, 30–32, 38–45, 55–69) at 10–15%, about twice the base rate. The non-task clusters (50–54, 70–95) are at 0–5%.
+- **Rastermap sorts the synthetic cells into sequences.** The train raster (`rasters.png`, middle column) has sharp single-type diagonals, in block_change_s, stimLbRcL, stimRbRcR and stimRbLcR. They are absent from the test half, which is the signature used to pick the real sequence clusters.
+- **They co-cluster with the sequence cells.** Across clusters, the synthetic distribution tracks the sequence distribution, not the stim/integ peaks (`composition.png`).
+- **Some stim/integ structure survives.** About a fifth of the synthetic cells stay in stim/integ clusters. One block (rows about 1,000–1,500) keeps a short latency-graded response at each type onset that reproduces in the test half, which is the residual shared response seen in panel f.
+- Caveat: one thinning seed and one noise draw. Synthetic cells were not re-picked by eye as sequence clusters, so it is untested whether a blind picker would count them.
+
+## Significance of the spread difference
+
+Added 2026-11-14. Script: `seq_spread_stats.py`, with the numpy-only worker code in `spread_core.py`. Output: `figs/figure5_new/thin_match/spread_stats.json`.
+
+**The statistic.** D = spread(control) − spread(sequence), on the test half and the six analysed types. Spread is computed with the original thirds (bins 0–23 vs 48–71), and with trimmed thirds over bins 6–65 (6–25 vs 46–65), which keeps away from the trial-type edges. The faster spread code reproduces the old values: sequence 0.0015 / −0.0026, stim/integ 0.197 / 0.141.
+
+**Bootstrap over insertions (paired), 1000 iterations.**
+- Each iteration resamples the 515 insertions with replacement. A resampled insertion brings all of its sequence cells and all of its control cells.
+- Noisy controls get a random draw from a bank of 20 precomputed noise draws. Thinned controls also get a random thinning seed.
+- p is two-sided, and 0.001 is the floor ("≤.001" below).
+- A second comparison uses sequence subsampled to the control's cell count (n matched). It changes D by less than 0.001 and gives similar p, so the difference in cell count does not matter.
+
+**Implementation notes.**
+- The first version regenerated noise in every iteration, at about 1.1 s per noisy control. It ran single-threaded at about 4 s per iteration. The bank plus 6 joblib workers brought the run down to 4 min for the bootstrap.
+- Workers must not import `fig5`. That import builds a ONE client in `dmn_ari`, and six parallel workers race on `~/.one`.
+
+**Within-insertion label permutation: discarded.** The shuffle keeps each group's cell counts per insertion. The control group therefore draws most of its cells from insertions rich in stim/integ cells, so its shuffled version still holds more stim/integ cells than the shuffled sequence group. The null mean of D comes out at 0.089 for stim/integ and 0.022 for thinned + count, not 0, so the null is not "no difference" and the noisy controls get negative z. For the partner sets the null is centred near 0 (0.003–0.011). There, the permutation agrees with the bootstrap at z of 5–14.
+
+Bootstrap results: D vs sequence [95% CI], two-sided p.
+
+| control | within, thirds | within, trimmed | cross, thirds | cross, trimmed |
+|---|---|---|---|---|
+| stim/integ | 0.196 [0.172, 0.216] ≤.001 | 0.161 ≤.001 | 0.144 ≤.001 | 0.114 ≤.001 |
+| + Gaussian (mean) | 0.018 [0.005, 0.027] .002 | 0.017 [0.004, 0.027] .010 | 0.017 ≤.001 | 0.016 ≤.001 |
+| + Gaussian (rank) | 0.026 ≤.001 | 0.022 .004 | 0.022 ≤.001 | 0.018 ≤.001 |
+| + Gaussian (ρ = 0.1) | 0.031 ≤.001 | 0.028 ≤.001 | 0.026 ≤.001 | 0.024 ≤.001 |
+| + Gaussian (ρ = 0.2) | 0.062 ≤.001 | 0.054 ≤.001 | 0.047 ≤.001 | 0.040 ≤.001 |
+| thinned | 0.079 ≤.001 | 0.060 ≤.001 | 0.054 ≤.001 | 0.039 ≤.001 |
+| thinned + gauss | 0.024 ≤.001 | 0.021 ≤.001 | 0.019 ≤.001 | 0.017 ≤.001 |
+| thinned + count | 0.010 [0.001, 0.023] .032 | 0.008 [−0.002, 0.019] .118 | 0.008 [0.003, 0.015] ≤.001 | 0.007 [0.001, 0.014] .016 |
+| fr+region partners | 0.039 [0.031, 0.047] ≤.001 | 0.031 ≤.001 | 0.013 ≤.001 | 0.010 ≤.001 |
+| fr partners | 0.049 ≤.001 | 0.043 ≤.001 | 0.016 ≤.001 | 0.013 ≤.001 |
+| fr+peak partners | 0.064 ≤.001 | 0.054 ≤.001 | 0.027 ≤.001 | 0.023 ≤.001 |
+
+Bootstrap SD of the sequence spread itself is 0.003 within and 0.0016 cross.
+
+Readout:
+
+- **Sequence spread is about 0, and lower than every control.** That includes the real fr-matched cells, which have no added noise and the same rates: D 0.04–0.06 within and 0.01–0.03 cross, all p ≤ .001. So the lack of spread is a property of sequence cells, not of their low rate. Real cells of the same rate show it.
+- **The thinned + count control is the only one close to sequence.**
+  - Spread within: p = .032 with the original thirds. With the edges trimmed it is not significant (p = .118; n matched .19).
+  - Spread cross: still significant (p ≤ .001 thirds, .016 trimmed; n matched .012 / .036), but the effect is small at 0.007–0.008.
+  - So the synthetic control comes close to sequence cells when rate and reliability are both matched and the noise is rate-scaled. Real cells at the same rate do not.
+- **Multiple comparisons:** 11 controls × 4 metrics is 44 tests, so the Bonferroni threshold is .0011. Every "≤.001" result survives it. The thinned + count results do not, nor do Gaussian (mean) within and Gaussian (rank) within, trimmed.
+- **Caveats.**
+  - Partner sets are one match (seed 0), not resampled.
+  - The bank holds 20 noise draws, while the seed SD of spread is about 0.003, well below the bootstrap SD.
+  - p is floored at .001 by 1000 iterations.
 
 ## Open items / next steps
 
-- Block information in sequence cells, tested directly: blockL vs blockR segments (cross-half, as above), and the per-cell level coupling between trial types that share a block.
+- Block information in sequence cells, tested directly: blockL vs blockR segments (cross-half, as in [SEQ_RELIABILITY.md](SEQ_RELIABILITY.md)), and the per-cell level coupling between trial types that share a block.
 - Separate stimulus side from choice side in the side information. This needs error trials split by side, which the stack doesn't have (mistake_s pools both sides).
 
 - Unit quality of sequence cells vs fr-matched cells: presence ratio, amplitude, drift, ISI violations. This would explain why sequence cells are less reliable than other cells at the same rate. It needs the clusters tables, not `brainwidemap`.
 - Null for the sequence picks: take a stack of pure noise matched in per-type SD and smoothing, run the same Rastermap fit, and see whether diagonals of similar sharpness and cell count appear. Partly answered by the firing-rate matched control: fr-matched cells sorted by train peak give equally sharp diagonals. What is still open is whether the whole-stack Rastermap would cluster pure noise rows into diagonal clusters.
 - ~~Find the code that built the odd/even stack.~~ Done 2026-11-13: upstream `dmn_bwm._oddeven_means_concat`, by position within each type's list (see "Spike-thinned stim/integ cells").
 - Unit quality: `bwm_tables/clusters.pqt` has presence ratio, drift, contamination, amplitude and sliding-RP violations per uuid, so this needs no job.
-- Significance of the spread-over-time difference: bootstrap over insertions (`pid`), then cells, with fresh noise each iteration, plus a label permutation within insertions. Use the thirds over bins 6-65 to avoid edge effects. Deferred for now.
+- ~~Significance of the spread-over-time difference.~~ Done 2026-11-14 with an insertion bootstrap (see "Significance of the spread difference"). The within-insertion permutation was discarded because its null is biased.
 
 - Check whether the sequence same-type block structure is per-cell trial-type offsets. Compare the variance of segment means between groups, and redo the across-type analysis after subtracting each cell's per-segment mean.
 - Run `--data old` for the cached stack.
