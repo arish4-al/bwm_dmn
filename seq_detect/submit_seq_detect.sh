@@ -11,6 +11,9 @@
 # 1.4 GB peak for a 234-unit insertion. 16 shards of 2,850-4,290 units: about
 # 5 min each; the time limit is 2 h.
 #
+# Pooled trials (one type, the union of the six; output seq_detect_pooled/):
+#   POOLED=1 bash seq_detect/submit_seq_detect.sh
+#
 # Override: N_SHARDS=32 MEM_SHARD=12G PARTITION=mit_preemptable \
 #   bash seq_detect/submit_seq_detect.sh
 
@@ -20,7 +23,12 @@ REPO_DIR="${REPO_DIR:-$HOME/int-brain-lab/bwm_dmn}"
 cd "$REPO_DIR"
 
 ONE_CACHE_DIR="${ONE_CACHE_DIR:-/orcd/data/fiete/001/om2/arily/int-brain-lab/ONE/alyx}"
-OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect}"
+POOLED="${POOLED:-}"
+if [[ -n "$POOLED" ]]; then
+  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect_pooled}"
+else
+  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect}"
+fi
 N_SHARDS="${N_SHARDS:-16}"
 MEM_SHARD="${MEM_SHARD:-8G}"
 MEM_STACK="${MEM_STACK:-16G}"
@@ -35,8 +43,8 @@ source "$REPO_DIR/stint_thin/sbatch_defaults.sh"
 [[ -d "$ONE_CACHE_DIR/manifold/insertion_cache" ]] || {
   echo "missing $ONE_CACHE_DIR/manifold/insertion_cache" >&2; exit 1; }
 
-COMMON="ALL,REPO_DIR=$REPO_DIR,ONE_CACHE_DIR=$ONE_CACHE_DIR,OUT=$OUT"
-echo "PARTITION=$PARTITION N_SHARDS=$N_SHARDS MEM_SHARD=$MEM_SHARD OUT=$OUT"
+COMMON="ALL,REPO_DIR=$REPO_DIR,ONE_CACHE_DIR=$ONE_CACHE_DIR,OUT=$OUT,POOLED=$POOLED"
+echo "PARTITION=$PARTITION N_SHARDS=$N_SHARDS MEM_SHARD=$MEM_SHARD OUT=$OUT POOLED=$POOLED"
 
 SHARD_JOBS=()
 for ((k=0; k<N_SHARDS; k++)); do

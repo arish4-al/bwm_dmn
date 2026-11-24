@@ -79,7 +79,10 @@ CHUNK_ELEMS = 2 * 10 ** 7         # draws x cells x NF per bincount
 CHUNK_SPIKES = int(os.environ.get('SEQ_DETECT_CHUNK_SPIKES', 10 ** 5))   # draws x spikes per chunk (small is faster: cache)
 
 
-def session_events(trials_all, eid):
+def session_events(trials_all, eid, pooled=False):
+    """{type: stimulus-onset times of its trials, session order}. With
+    pooled: one type, 'pooled', the union of the six types' trials (each
+    trial once; change_b and mistake share trials), in session order."""
     trials = trials_all[trials_all['eid'] == eid].reset_index(drop=True)
     if trials.empty:
         raise RuntimeError(f'no trials for {eid} in trials.pqt')
@@ -87,12 +90,15 @@ def session_events(trials_all, eid):
     for s in SAT:
         mask &= ~trials[s].to_numpy().astype(bool)
     tts = trial_types(trials, mask)
-    out = {}
+    out, union = {}, np.zeros(len(trials), bool)
     for k in TYPES:
         col, m, pp = tts[k]
-        if pp != (0, .15):
-            raise RuntimeError(f'{k}: window {pp}, expected (0, 0.15)')
+        if pp != (0, .15) or col != 'stimOn_times':
+            raise RuntimeError(f'{k}: {col} {pp}, expected stimOn_times (0, 0.15)')
         out[k] = trials[col].to_numpy()[np.where(m)[0]]
+        union |= np.asarray(m, bool)
+    if pooled:
+        return {'pooled': trials['stimOn_times'].to_numpy()[np.where(union)[0]]}
     return out
 
 
@@ -281,10 +287,12 @@ def compute(args):
         cidx = np.searchsorted(ids, clus)
         n_c = len(ids)
         t1 = time.time()
-        events = session_events(trials_all, eid)
+        events = session_events(trials_all, eid, args.pooled)
+        types = list(events)
         seed = zlib.crc32(pid.encode())
         R = {}
-        for ti, k in enumerate(TYPES):
+        for k in types:
+            ti = (TYPES + ['pooled']).index(k)
             R[k] = per_type(times, cidx, n_c, events[k], np.random.default_rng([seed, ti]))
             if args.check:
                 ev = events[k][np.isfinite(events[k])]
@@ -295,17 +303,18 @@ def compute(args):
                 if not diff <= 1e-5:
                     raise RuntimeError(f'{pid} {k}: P_exact differs from bin_peth by {diff}')
         # p corrected for the max over types, per set
-        PN = np.stack([R[k]['p_null'] for k in TYPES], -1)      # (D, cells, 3, 6)
-        PO = np.stack([R[k]['p'] for k in TYPES], -1)           # (cells, 3, 6)
-        ntr = np.stack([R[k]['ntr'] for k in TYPES], -1)        # (3, 6)
+        PN = np.stack([R[k]['p_null'] for k in types], -1)      # (D, cells, 3, types)
+        PO = np.stack([R[k]['p'] for k in types], -1)           # (cells, 3, types)
+        ntr = np.stack([R[k]['ntr'] for k in types], -1)        # (3, types)
         PN = np.where(ntr[None, None] > 0, PN, 1.0)
         mn_null, mn_obs = PN.min(-1), PO.min(-1)                # (D, cells, 3), (cells, 3)
         p_corr = (1 + (mn_null <= mn_obs[None]).sum(0)) / (N_DRAWS + 1)
         p0_corr = (1 + (mn_null[1:] <= mn_null[:1]).sum(0)) / N_DRAWS
 
         def st(key, axis=1):
-            return np.stack([R[k][key] for k in TYPES], axis)
+            return np.stack([R[k][key] for k in types], axis)
         res = {'uuid': units['uuids'].to_numpy().astype(str), 'cluster_id': ids,
+               'types': np.array(types),
                'ntr': ntr.T,                                     # (6, 3)
                'n_active': st('n_active').astype(np.int32),     # (cells, 6, 3)
                'obs': st('obs').astype(np.int32),
@@ -334,8 +343,14 @@ def stack(args):
     keys_c = ['uuid', 'cluster_id', 'n_active', 'obs', 'peak', 'p', 'p0', 'p_corr',
               'p0_corr', 'rel']
     acc = {k: [] for k in keys_c + ['P_circ', 'P_exact', 'ntr', 'pid']}
+    types = None
     for p, f in shards.items():
         z = np.load(f)
+        t = list(z['types']) if 'types' in z.files else list(TYPES)   # six-type shards before --pooled
+        if types is None:
+            types = t
+        elif t != types:
+            raise SystemExit(f'{p}: types {t}, expected {types} (mixed --pooled shards?)')
         nc = len(z['uuid'])
         for k in keys_c:
             acc[k].append(z[k])
@@ -344,7 +359,7 @@ def stack(args):
         acc['pid'].append(np.full(nc, p))
     out = {k: np.concatenate(v, 1 if k in ('P_circ', 'P_exact') else 0) for k, v in acc.items()}
     f = args.out / 'seq_detect.npz'
-    np.savez_compressed(f, **out, types=np.array(TYPES), sets=np.array(SETS),
+    np.savez_compressed(f, **out, types=np.array(types), sets=np.array(SETS),
                         rel_pairs=np.array([f'{a}@{b}' for a, b in REL_PAIRS]),
                         win_ms=np.array(WIN_MS), n_draws=N_DRAWS,
                         starts_ms=STARTS * FINE * 1e3)
@@ -367,6 +382,8 @@ def main():
     ap.add_argument('--check', action='store_true',
                     help='assert P_exact equals the stack binning (brainbox)')
     ap.add_argument('--force', action='store_true', help='recompute existing shards')
+    ap.add_argument('--pooled', action='store_true',
+                    help="one type: the union of the six types' trials (use its own --out)")
     args = ap.parse_args()
     compute(args) if args.step == 'compute' else stack(args)
 
