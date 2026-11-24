@@ -76,7 +76,7 @@ REL_PAIRS = [('all', 'all'), ('odd', 'odd'), ('even', 'even'),
              ('even', 'odd'), ('odd', 'even')]    # (eval set, peak set)
 N_DRAWS = 2000
 CHUNK_ELEMS = 2 * 10 ** 7         # draws x cells x NF per bincount
-CHUNK_SPIKES = 10 ** 7            # draws x spikes per chunk
+CHUNK_SPIKES = int(os.environ.get('SEQ_DETECT_CHUNK_SPIKES', 10 ** 5))   # draws x spikes per chunk (small is faster: cache)
 
 
 def session_events(trials_all, eid):
@@ -126,12 +126,12 @@ def exact_cols(t_abs, ev_tr):
     return np.concatenate(si), np.concatenate(cols)
 
 
-def max_null(sp, n_c, rng_shifts):
-    """Generator over draw chunks: (Dc, cells) max column sum, from spikes
-    sp = (trial, cell, fine bin) and shifts (D, n_trials)."""
+def max_null(sp, n_c, rng_shifts, dc):
+    """Generator over chunks of dc draws: (Dc, cells, NF) shifted fine
+    counts, from spikes sp = (trial, cell, fine bin) and shifts (D, n_trials).
+    Callers zipping two of these must pass the same dc."""
     tr, ci, fb = sp
     D = rng_shifts.shape[0]
-    dc = max(1, min(CHUNK_ELEMS // (n_c * NF), CHUNK_SPIKES // max(len(tr), 1)))
     for a in range(0, D, dc):
         b = min(D, a + dc)
         sh = rng_shifts[a:b][:, tr]                         # (Dc, spikes)
@@ -200,14 +200,20 @@ def per_type(times, cidx, n_c, ev, rng):
     for s in ('odd', 'even'):
         m = np.isin(trw, sets[s])
         sp[s] = (trw[m], ciw[m], fb[m])
+    nsp = max(len(sp['odd'][0]), len(sp['even'][0]), 1)
+    dc = max(1, min(CHUNK_ELEMS // (n_c * NF), CHUNK_SPIKES // nsp))
     d0 = 0
-    for Ho, He in zip(max_null(sp['odd'], n_c, shifts['odd']),
-                      max_null(sp['even'], n_c, shifts['even'])):
-        dc = Ho.shape[0]
-        M[d0:d0 + dc, :, 1] = colsum(Ho).max(-1)
-        M[d0:d0 + dc, :, 2] = colsum(He).max(-1)
-        M[d0:d0 + dc, :, 0] = colsum(Ho + He).max(-1)
-        d0 += dc
+    for Ho, He in zip(max_null(sp['odd'], n_c, shifts['odd'], dc),
+                      max_null(sp['even'], n_c, shifts['even'], dc)):
+        if Ho.shape[0] != He.shape[0]:
+            raise RuntimeError('odd and even draw chunks out of step')
+        dc_ = Ho.shape[0]
+        M[d0:d0 + dc_, :, 1] = colsum(Ho).max(-1)
+        M[d0:d0 + dc_, :, 2] = colsum(He).max(-1)
+        M[d0:d0 + dc_, :, 0] = colsum(Ho + He).max(-1)
+        d0 += dc_
+    if d0 != N_DRAWS:
+        raise RuntimeError(f'{d0} draws computed, expected {N_DRAWS}')
     p = (1 + (M >= obs[None]).sum(0)) / (N_DRAWS + 1)       # (cells, 3)
     p0 = (1 + (M[1:] >= M[:1]).sum(0)) / N_DRAWS
     for si_, s in enumerate(SETS):                          # an empty set tests nothing

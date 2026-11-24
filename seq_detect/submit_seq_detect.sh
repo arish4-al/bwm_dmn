@@ -7,9 +7,9 @@
 # Needs bwm_tables/clusters.pqt (good units, label == 1),
 # manifold/insertion_cache + bwm_tables/trials.pqt under ONE_CACHE_DIR.
 # Shards skip insertions already written, so a rerun only fills gaps.
-# Local timing: about 0.2 s per unit (2000 shuffles x 2 halves x 6 types) and
-# 2.6 GB peak for a 234-unit insertion. 16 shards of 2,850-4,290 units: about
-# 10-15 min each; the time limit is 2 h.
+# Local timing: about 0.06 s per unit (2000 shuffles x 2 halves x 6 types) and
+# 1.4 GB peak for a 234-unit insertion. 16 shards of 2,850-4,290 units: about
+# 5 min each; the time limit is 2 h.
 #
 # Override: N_SHARDS=32 MEM_SHARD=12G PARTITION=mit_preemptable \
 #   bash seq_detect/submit_seq_detect.sh

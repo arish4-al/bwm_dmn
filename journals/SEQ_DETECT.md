@@ -40,7 +40,7 @@ Per unit, type and trial set (all, odd, even, by position in the type's own list
 | stored max = n_trials × max(`P_circ`) | to float32 precision |
 | calibration: fraction of units with p0 < .05, per type (all trials) | 0.010–0.030 |
 | calibration: p0_corr < .05 (all / odd / even) | 0.031 / 0.039 / 0.030 |
-| time, memory | about 0.2 s per unit; 2.8 GB peak (234 units, with --check) |
+| time, memory | about 0.06 s per unit; 1.4 GB peak (234 units) |
 
 The calibration is below 5%: spike counts are discrete, so maxima tie, and p counts ties against the data. The test is somewhat conservative, more so at low rates. Pass rates on these 700 units are not interpreted (6 insertions).
 
@@ -52,7 +52,7 @@ Commit and pull there first, then:
 bash seq_detect/submit_seq_detect.sh
 ```
 
-16 shards (2,850–4,290 units each, about 10–15 min) at 8 G and 2 h, then the stack job. Output: `$ONE_CACHE_DIR/dmn/res/seq_detect/seq_detect.npz` (about 50 MB); rsync it to `~/Downloads/seq_detect/`.
+16 shards (2,850–4,290 units each, about 5 min) at 8 G and 2 h, then the stack job. Output: `$ONE_CACHE_DIR/dmn/res/seq_detect/seq_detect.npz` (about 50 MB); rsync it to `~/Downloads/seq_detect/`.
 
 ## Next steps (one at a time)
 
