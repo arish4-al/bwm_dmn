@@ -14,6 +14,10 @@
 # Pooled trials (one type, the union of the six; output seq_detect_pooled/):
 #   POOLED=1 bash seq_detect/submit_seq_detect.sh
 #
+# One contrast group (low, high, low_nz; output seq_detect_pooled_{group}/):
+#   POOLED=1 CONTRAST=low bash seq_detect/submit_seq_detect.sh
+#   POOLED=1 CONTRAST=high bash seq_detect/submit_seq_detect.sh
+#
 # Override: N_SHARDS=32 MEM_SHARD=12G PARTITION=mit_preemptable \
 #   bash seq_detect/submit_seq_detect.sh
 
@@ -24,10 +28,12 @@ cd "$REPO_DIR"
 
 ONE_CACHE_DIR="${ONE_CACHE_DIR:-/orcd/data/fiete/001/om2/arily/int-brain-lab/ONE/alyx}"
 POOLED="${POOLED:-}"
+CONTRAST="${CONTRAST:-}"
+case "$CONTRAST" in ""|low|high|low_nz) ;; *) echo "CONTRAST=$CONTRAST: use low, high or low_nz" >&2; exit 2;; esac
 if [[ -n "$POOLED" ]]; then
-  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect_pooled}"
+  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect_pooled${CONTRAST:+_$CONTRAST}}"
 else
-  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect}"
+  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect${CONTRAST:+_$CONTRAST}}"
 fi
 N_SHARDS="${N_SHARDS:-16}"
 MEM_SHARD="${MEM_SHARD:-8G}"
@@ -43,8 +49,8 @@ source "$REPO_DIR/stint_thin/sbatch_defaults.sh"
 [[ -d "$ONE_CACHE_DIR/manifold/insertion_cache" ]] || {
   echo "missing $ONE_CACHE_DIR/manifold/insertion_cache" >&2; exit 1; }
 
-COMMON="ALL,REPO_DIR=$REPO_DIR,ONE_CACHE_DIR=$ONE_CACHE_DIR,OUT=$OUT,POOLED=$POOLED"
-echo "PARTITION=$PARTITION N_SHARDS=$N_SHARDS MEM_SHARD=$MEM_SHARD OUT=$OUT POOLED=$POOLED"
+COMMON="ALL,REPO_DIR=$REPO_DIR,ONE_CACHE_DIR=$ONE_CACHE_DIR,OUT=$OUT,POOLED=$POOLED,CONTRAST=$CONTRAST"
+echo "PARTITION=$PARTITION N_SHARDS=$N_SHARDS MEM_SHARD=$MEM_SHARD OUT=$OUT POOLED=$POOLED CONTRAST=$CONTRAST"
 
 SHARD_JOBS=()
 for ((k=0; k<N_SHARDS; k++)); do

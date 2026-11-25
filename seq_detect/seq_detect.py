@@ -46,6 +46,14 @@ Inputs, disk only (no ONE, no Alyx), as contrast_split/:
 
   python seq_detect.py compute --shard 0 --n-shards 16 --out OUT
   python seq_detect.py stack --out OUT
+
+  --pooled     one type: the union of the six types' trials
+  --contrast   keep only trials of one contrast group (|contrast|, either
+               side), as contrast_split/: low = 0, 0.0625, 0.125; high = 0.25,
+               1; low_nz = 0.0625, 0.125. Applied to each type's trial list
+               (or the pooled list) before odd/even, so odd/even are by
+               position in the group's own list. Shuffle seeds then also
+               depend on the group. Use its own --out.
 """
 
 import argparse
@@ -75,14 +83,17 @@ WIN_MS = (10, 20, 30)
 REL_PAIRS = [('all', 'all'), ('odd', 'odd'), ('even', 'even'),
              ('even', 'odd'), ('odd', 'even')]    # (eval set, peak set)
 N_DRAWS = 2000
+GROUPS = {'low': (0.0, 0.0625, 0.125), 'high': (0.25, 1.0),
+          'low_nz': (0.0625, 0.125)}     # as contrast_split/contrast_peths.py
 CHUNK_ELEMS = 2 * 10 ** 7         # draws x cells x NF per bincount
 CHUNK_SPIKES = int(os.environ.get('SEQ_DETECT_CHUNK_SPIKES', 10 ** 5))   # draws x spikes per chunk (small is faster: cache)
 
 
-def session_events(trials_all, eid, pooled=False):
+def session_events(trials_all, eid, pooled=False, contrast=None):
     """{type: stimulus-onset times of its trials, session order}. With
     pooled: one type, 'pooled', the union of the six types' trials (each
-    trial once; change_b and mistake share trials), in session order."""
+    trial once; change_b and mistake share trials), in session order. With
+    contrast (a GROUPS key): only trials whose |contrast| is in the group."""
     trials = trials_all[trials_all['eid'] == eid].reset_index(drop=True)
     if trials.empty:
         raise RuntimeError(f'no trials for {eid} in trials.pqt')
@@ -90,13 +101,19 @@ def session_events(trials_all, eid, pooled=False):
     for s in SAT:
         mask &= ~trials[s].to_numpy().astype(bool)
     tts = trial_types(trials, mask)
+    keep = np.ones(len(trials), bool)
+    if contrast is not None:
+        c = (np.nan_to_num(trials['contrastLeft'].to_numpy())
+             + np.nan_to_num(trials['contrastRight'].to_numpy()))
+        keep = np.isin(c, GROUPS[contrast])
     out, union = {}, np.zeros(len(trials), bool)
     for k in TYPES:
         col, m, pp = tts[k]
         if pp != (0, .15) or col != 'stimOn_times':
             raise RuntimeError(f'{k}: {col} {pp}, expected stimOn_times (0, 0.15)')
+        m = np.asarray(m, bool) & keep
         out[k] = trials[col].to_numpy()[np.where(m)[0]]
-        union |= np.asarray(m, bool)
+        union |= m
     if pooled:
         return {'pooled': trials['stimOn_times'].to_numpy()[np.where(union)[0]]}
     return out
@@ -249,7 +266,7 @@ def compute(args):
     out = args.out / 'shards'
     out.mkdir(parents=True, exist_ok=True)
     print(f'shard {args.shard}/{args.n_shards}: {len(mine)} of {len(pids)} insertions, '
-          f'{N_DRAWS} draws', flush=True)
+          f'{N_DRAWS} draws, pooled={args.pooled}, contrast={args.contrast}', flush=True)
 
     cl = pd.read_parquet(args.clusters or one_dir / 'bwm_tables' / 'clusters.pqt',
                          columns=['uuids', 'cluster_id', 'pid', 'label'])
@@ -287,13 +304,14 @@ def compute(args):
         cidx = np.searchsorted(ids, clus)
         n_c = len(ids)
         t1 = time.time()
-        events = session_events(trials_all, eid, args.pooled)
+        events = session_events(trials_all, eid, args.pooled, args.contrast)
         types = list(events)
         seed = zlib.crc32(pid.encode())
         R = {}
         for k in types:
             ti = (TYPES + ['pooled']).index(k)
-            R[k] = per_type(times, cidx, n_c, events[k], np.random.default_rng([seed, ti]))
+            key = [seed, ti] if args.contrast is None else [seed, ti, 1 + list(GROUPS).index(args.contrast)]
+            R[k] = per_type(times, cidx, n_c, events[k], np.random.default_rng(key))
             if args.check:
                 ev = events[k][np.isfinite(events[k])]
                 X = bin_peth(times, clus, ids, ev, 0, .15)
@@ -315,6 +333,7 @@ def compute(args):
             return np.stack([R[k][key] for k in types], axis)
         res = {'uuid': units['uuids'].to_numpy().astype(str), 'cluster_id': ids,
                'types': np.array(types),
+               'contrast': np.array(args.contrast or 'all'),
                'ntr': ntr.T,                                     # (6, 3)
                'n_active': st('n_active').astype(np.int32),     # (cells, 6, 3)
                'obs': st('obs').astype(np.int32),
@@ -343,14 +362,16 @@ def stack(args):
     keys_c = ['uuid', 'cluster_id', 'n_active', 'obs', 'peak', 'p', 'p0', 'p_corr',
               'p0_corr', 'rel']
     acc = {k: [] for k in keys_c + ['P_circ', 'P_exact', 'ntr', 'pid']}
-    types = None
+    types = contrast = None
     for p, f in shards.items():
         z = np.load(f)
         t = list(z['types']) if 'types' in z.files else list(TYPES)   # six-type shards before --pooled
+        c = str(z['contrast']) if 'contrast' in z.files else 'all'    # shards before --contrast
         if types is None:
-            types = t
-        elif t != types:
-            raise SystemExit(f'{p}: types {t}, expected {types} (mixed --pooled shards?)')
+            types, contrast = t, c
+        elif t != types or c != contrast:
+            raise SystemExit(f'{p}: types {t}, contrast {c}, expected {types}, {contrast} '
+                             f'(mixed --pooled / --contrast shards?)')
         nc = len(z['uuid'])
         for k in keys_c:
             acc[k].append(z[k])
@@ -359,11 +380,11 @@ def stack(args):
         acc['pid'].append(np.full(nc, p))
     out = {k: np.concatenate(v, 1 if k in ('P_circ', 'P_exact') else 0) for k, v in acc.items()}
     f = args.out / 'seq_detect.npz'
-    np.savez_compressed(f, **out, types=np.array(types), sets=np.array(SETS),
+    np.savez_compressed(f, **out, types=np.array(types), contrast=np.array(contrast), sets=np.array(SETS),
                         rel_pairs=np.array([f'{a}@{b}' for a, b in REL_PAIRS]),
                         win_ms=np.array(WIN_MS), n_draws=N_DRAWS,
                         starts_ms=STARTS * FINE * 1e3)
-    print(f'{len(out["uuid"])} cells from {len(pids)} insertions -> {f}')
+    print(f'{len(out["uuid"])} cells from {len(pids)} insertions, contrast {contrast} -> {f}')
 
 
 def main():
@@ -384,6 +405,8 @@ def main():
     ap.add_argument('--force', action='store_true', help='recompute existing shards')
     ap.add_argument('--pooled', action='store_true',
                     help="one type: the union of the six types' trials (use its own --out)")
+    ap.add_argument('--contrast', choices=list(GROUPS), default=None,
+                    help='only trials of this contrast group (default: all; use its own --out)')
     args = ap.parse_args()
     compute(args) if args.step == 'compute' else stack(args)
 
