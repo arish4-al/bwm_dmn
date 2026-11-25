@@ -17,7 +17,7 @@
 # and bwm_tables/clusters.pqt. No ONE, no Alyx.
 # Submit with seq_detect/submit_seq_detect.sh (not from the laptop).
 # Env: STEP, SHARD_IDX, N_SHARDS, OUT, POOLED (non-empty: --pooled),
-#      CONTRAST (low|high|low_nz: --contrast)
+#      CONTRAST (low|high|low_nz: --contrast), ALIGN (stim|move: --align)
 
 set -euo pipefail
 
@@ -34,13 +34,13 @@ OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect}"
 module load miniforge
 conda activate ~/conda_envs/ibl
 cd "$REPO_DIR"
-echo "Host: $(hostname) Date: $(date) STEP=$STEP OUT=$OUT POOLED=${POOLED:-} CONTRAST=${CONTRAST:-}"
+echo "Host: $(hostname) Date: $(date) STEP=$STEP OUT=$OUT POOLED=${POOLED:-} CONTRAST=${CONTRAST:-} ALIGN=${ALIGN:-stim}"
 git log -1 --oneline
 
 if [[ "$STEP" == "compute" ]]; then
   python3 -u seq_detect/seq_detect.py compute \
     --shard "${SHARD_IDX:?Set SHARD_IDX}" --n-shards "${N_SHARDS:?Set N_SHARDS}" \
-    --out "$OUT" --one-cache-dir "$ONE_CACHE_DIR" ${POOLED:+--pooled} ${CONTRAST:+--contrast "$CONTRAST"}
+    --out "$OUT" --one-cache-dir "$ONE_CACHE_DIR" ${POOLED:+--pooled} ${CONTRAST:+--contrast "$CONTRAST"} --align "${ALIGN:-stim}"
 elif [[ "$STEP" == "stack" ]]; then
   python3 -u seq_detect/seq_detect.py stack --out "$OUT"
   ls -lh "$OUT"/seq_detect.npz

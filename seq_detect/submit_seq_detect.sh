@@ -18,6 +18,9 @@
 #   POOLED=1 CONTRAST=low bash seq_detect/submit_seq_detect.sh
 #   POOLED=1 CONTRAST=high bash seq_detect/submit_seq_detect.sh
 #
+# Same trials aligned to first movement, [-150, 0) ms (output suffix _move):
+#   POOLED=1 ALIGN=move bash seq_detect/submit_seq_detect.sh
+#
 # Override: N_SHARDS=32 MEM_SHARD=12G PARTITION=mit_preemptable \
 #   bash seq_detect/submit_seq_detect.sh
 
@@ -29,11 +32,14 @@ cd "$REPO_DIR"
 ONE_CACHE_DIR="${ONE_CACHE_DIR:-/orcd/data/fiete/001/om2/arily/int-brain-lab/ONE/alyx}"
 POOLED="${POOLED:-}"
 CONTRAST="${CONTRAST:-}"
+ALIGN="${ALIGN:-stim}"
+case "$ALIGN" in stim|move) ;; *) echo "ALIGN=$ALIGN: use stim or move" >&2; exit 2;; esac
+ASUF=""; [[ "$ALIGN" == "move" ]] && ASUF="_move"
 case "$CONTRAST" in ""|low|high|low_nz) ;; *) echo "CONTRAST=$CONTRAST: use low, high or low_nz" >&2; exit 2;; esac
 if [[ -n "$POOLED" ]]; then
-  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect_pooled${CONTRAST:+_$CONTRAST}}"
+  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect_pooled${CONTRAST:+_$CONTRAST}$ASUF}"
 else
-  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect${CONTRAST:+_$CONTRAST}}"
+  OUT="${OUT:-$ONE_CACHE_DIR/dmn/res/seq_detect${CONTRAST:+_$CONTRAST}$ASUF}"
 fi
 N_SHARDS="${N_SHARDS:-16}"
 MEM_SHARD="${MEM_SHARD:-8G}"
@@ -49,8 +55,8 @@ source "$REPO_DIR/stint_thin/sbatch_defaults.sh"
 [[ -d "$ONE_CACHE_DIR/manifold/insertion_cache" ]] || {
   echo "missing $ONE_CACHE_DIR/manifold/insertion_cache" >&2; exit 1; }
 
-COMMON="ALL,REPO_DIR=$REPO_DIR,ONE_CACHE_DIR=$ONE_CACHE_DIR,OUT=$OUT,POOLED=$POOLED,CONTRAST=$CONTRAST"
-echo "PARTITION=$PARTITION N_SHARDS=$N_SHARDS MEM_SHARD=$MEM_SHARD OUT=$OUT POOLED=$POOLED CONTRAST=$CONTRAST"
+COMMON="ALL,REPO_DIR=$REPO_DIR,ONE_CACHE_DIR=$ONE_CACHE_DIR,OUT=$OUT,POOLED=$POOLED,CONTRAST=$CONTRAST,ALIGN=$ALIGN"
+echo "PARTITION=$PARTITION N_SHARDS=$N_SHARDS MEM_SHARD=$MEM_SHARD OUT=$OUT POOLED=$POOLED CONTRAST=$CONTRAST ALIGN=$ALIGN"
 
 SHARD_JOBS=()
 for ((k=0; k<N_SHARDS; k++)); do

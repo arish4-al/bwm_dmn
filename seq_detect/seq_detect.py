@@ -54,6 +54,16 @@ Inputs, disk only (no ONE, no Alyx), as contrast_split/:
                (or the pooled list) before odd/even, so odd/even are by
                position in the group's own list. Shuffle seeds then also
                depend on the group. Use its own --out.
+  --align move the same trials (types, odd/even, pooled, contrast as above),
+               aligned to first movement instead of stimulus onset: the
+               window is [-150, 0) ms before first movement (the stack's
+               movement-aligned segments, pre 0.15, post 0). Implemented as
+               events at firstMovement - 150 ms, so every column, shuffle and
+               reliability window is the stimulus code's, on the shifted
+               window; 'peak' and 'starts_ms' are then relative to the window
+               start (subtract 150 ms for time from movement). Trials with no
+               first movement time are dropped (counted in ntr). Shuffle seeds
+               also depend on the alignment. Use its own --out.
 """
 
 import argparse
@@ -89,8 +99,12 @@ CHUNK_ELEMS = 2 * 10 ** 7         # draws x cells x NF per bincount
 CHUNK_SPIKES = int(os.environ.get('SEQ_DETECT_CHUNK_SPIKES', 10 ** 5))   # draws x spikes per chunk (small is faster: cache)
 
 
-def session_events(trials_all, eid, pooled=False, contrast=None):
-    """{type: stimulus-onset times of its trials, session order}. With
+MOVE_PRE = 0.15                   # s; movement-aligned window [-MOVE_PRE, 0)
+
+
+def session_events(trials_all, eid, pooled=False, contrast=None, align='stim'):
+    """{type: window-start times of its trials, session order}: stimulus
+    onset, or with align='move' first movement - MOVE_PRE (same trials). With
     pooled: one type, 'pooled', the union of the six types' trials (each
     trial once; change_b and mistake share trials), in session order. With
     contrast (a GROUPS key): only trials whose |contrast| is in the group."""
@@ -106,16 +120,20 @@ def session_events(trials_all, eid, pooled=False, contrast=None):
         c = (np.nan_to_num(trials['contrastLeft'].to_numpy())
              + np.nan_to_num(trials['contrastRight'].to_numpy()))
         keep = np.isin(c, GROUPS[contrast])
+    if align == 'move':
+        ev_all = trials['firstMovement_times'].to_numpy() - MOVE_PRE
+    else:
+        ev_all = trials['stimOn_times'].to_numpy()
     out, union = {}, np.zeros(len(trials), bool)
     for k in TYPES:
         col, m, pp = tts[k]
         if pp != (0, .15) or col != 'stimOn_times':
             raise RuntimeError(f'{k}: {col} {pp}, expected stimOn_times (0, 0.15)')
         m = np.asarray(m, bool) & keep
-        out[k] = trials[col].to_numpy()[np.where(m)[0]]
+        out[k] = ev_all[np.where(m)[0]]
         union |= m
     if pooled:
-        return {'pooled': trials['stimOn_times'].to_numpy()[np.where(union)[0]]}
+        return {'pooled': ev_all[np.where(union)[0]]}
     return out
 
 
@@ -266,7 +284,8 @@ def compute(args):
     out = args.out / 'shards'
     out.mkdir(parents=True, exist_ok=True)
     print(f'shard {args.shard}/{args.n_shards}: {len(mine)} of {len(pids)} insertions, '
-          f'{N_DRAWS} draws, pooled={args.pooled}, contrast={args.contrast}', flush=True)
+          f'{N_DRAWS} draws, pooled={args.pooled}, contrast={args.contrast}, align={args.align}',
+          flush=True)
 
     cl = pd.read_parquet(args.clusters or one_dir / 'bwm_tables' / 'clusters.pqt',
                          columns=['uuids', 'cluster_id', 'pid', 'label'])
@@ -304,17 +323,22 @@ def compute(args):
         cidx = np.searchsorted(ids, clus)
         n_c = len(ids)
         t1 = time.time()
-        events = session_events(trials_all, eid, args.pooled, args.contrast)
+        events = session_events(trials_all, eid, args.pooled, args.contrast, args.align)
         types = list(events)
         seed = zlib.crc32(pid.encode())
         R = {}
         for k in types:
             ti = (TYPES + ['pooled']).index(k)
             key = [seed, ti] if args.contrast is None else [seed, ti, 1 + list(GROUPS).index(args.contrast)]
+            if args.align == 'move':
+                key = key + [101]                           # stim runs keep their seeds
             R[k] = per_type(times, cidx, n_c, events[k], np.random.default_rng(key))
             if args.check:
                 ev = events[k][np.isfinite(events[k])]
-                X = bin_peth(times, clus, ids, ev, 0, .15)
+                if args.align == 'move':                    # as the stack: first movement, pre 0.15
+                    X = bin_peth(times, clus, ids, ev + MOVE_PRE, MOVE_PRE, 0)
+                else:
+                    X = bin_peth(times, clus, ids, ev, 0, .15)
                 ref = np.stack([X[0::2].mean(0), X[1::2].mean(0)]).astype(np.float32)
                 diff = np.nanmax(np.abs(ref - R[k]['P_exact']), initial=0)
                 print(f'    check {k}: max |P_exact - bin_peth| = {diff:.2e}', flush=True)
@@ -334,6 +358,7 @@ def compute(args):
         res = {'uuid': units['uuids'].to_numpy().astype(str), 'cluster_id': ids,
                'types': np.array(types),
                'contrast': np.array(args.contrast or 'all'),
+               'align': np.array(args.align),
                'ntr': ntr.T,                                     # (6, 3)
                'n_active': st('n_active').astype(np.int32),     # (cells, 6, 3)
                'obs': st('obs').astype(np.int32),
@@ -362,16 +387,17 @@ def stack(args):
     keys_c = ['uuid', 'cluster_id', 'n_active', 'obs', 'peak', 'p', 'p0', 'p_corr',
               'p0_corr', 'rel']
     acc = {k: [] for k in keys_c + ['P_circ', 'P_exact', 'ntr', 'pid']}
-    types = contrast = None
+    types = contrast = align = None
     for p, f in shards.items():
         z = np.load(f)
         t = list(z['types']) if 'types' in z.files else list(TYPES)   # six-type shards before --pooled
         c = str(z['contrast']) if 'contrast' in z.files else 'all'    # shards before --contrast
+        a = str(z['align']) if 'align' in z.files else 'stim'         # shards before --align
         if types is None:
-            types, contrast = t, c
-        elif t != types or c != contrast:
-            raise SystemExit(f'{p}: types {t}, contrast {c}, expected {types}, {contrast} '
-                             f'(mixed --pooled / --contrast shards?)')
+            types, contrast, align = t, c, a
+        elif t != types or c != contrast or a != align:
+            raise SystemExit(f'{p}: types {t}, contrast {c}, align {a}, expected {types}, '
+                             f'{contrast}, {align} (mixed --pooled / --contrast / --align shards?)')
         nc = len(z['uuid'])
         for k in keys_c:
             acc[k].append(z[k])
@@ -380,11 +406,13 @@ def stack(args):
         acc['pid'].append(np.full(nc, p))
     out = {k: np.concatenate(v, 1 if k in ('P_circ', 'P_exact') else 0) for k, v in acc.items()}
     f = args.out / 'seq_detect.npz'
-    np.savez_compressed(f, **out, types=np.array(types), contrast=np.array(contrast), sets=np.array(SETS),
+    np.savez_compressed(f, **out, types=np.array(types), contrast=np.array(contrast),
+                        align=np.array(align), sets=np.array(SETS),
                         rel_pairs=np.array([f'{a}@{b}' for a, b in REL_PAIRS]),
                         win_ms=np.array(WIN_MS), n_draws=N_DRAWS,
                         starts_ms=STARTS * FINE * 1e3)
-    print(f'{len(out["uuid"])} cells from {len(pids)} insertions, contrast {contrast} -> {f}')
+    print(f'{len(out["uuid"])} cells from {len(pids)} insertions, contrast {contrast}, '
+          f'align {align} -> {f}')
 
 
 def main():
@@ -407,6 +435,9 @@ def main():
                     help="one type: the union of the six types' trials (use its own --out)")
     ap.add_argument('--contrast', choices=list(GROUPS), default=None,
                     help='only trials of this contrast group (default: all; use its own --out)')
+    ap.add_argument('--align', choices=['stim', 'move'], default='stim',
+                    help='window [0, 150) ms after stimulus (default) or [-150, 0) ms '
+                         'before first movement, same trials (use its own --out)')
     args = ap.parse_args()
     compute(args) if args.step == 'compute' else stack(args)
 
